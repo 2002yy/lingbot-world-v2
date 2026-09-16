@@ -53,16 +53,44 @@ CTRL_FLOOR = 1.0          # grey levels; keeps ratios finite
 
 # --------------------------------------------------------------------------
 def tile_bank(H, W, tile_hw, n=48, exclude=(), seed=0):
+    """Same-size tiles scattered over the frame, excluding object ROIs.
+
+    `exclude` rectangles are clamped to the frame. If the exclusion leaves no
+    room the bank would come back empty (which silently produced a
+    `np.concatenate` of nothing downstream) -- so we progressively shrink the
+    margin until at least one tile fits.
+    """
     rng = np.random.RandomState(seed)
     th, tw = tile_hw
-    out, tries = [], 0
-    while len(out) < n and tries < n * 200:
-        tries += 1
-        y = rng.randint(0, max(1, H - th))
-        x = rng.randint(0, max(1, W - tw))
-        if all((y + th <= ey0 or y >= ey1 or x + tw <= ex0 or x >= ex1)
-               for (ey0, ey1, ex0, ex1) in exclude):
-            out.append((y, x))
+    th = max(1, min(th, H))
+    tw = max(1, min(tw, W))
+
+    def _try(ex):
+        out, tries = [], 0
+        while len(out) < n and tries < n * 300:
+            tries += 1
+            y = rng.randint(0, max(1, H - th + 1))
+            x = rng.randint(0, max(1, W - tw + 1))
+            if all((y + th <= ey0 or y >= ey1 or x + tw <= ex0 or x >= ex1)
+                   for (ey0, ey1, ex0, ex1) in ex):
+                out.append((y, x))
+        return out
+
+    excl = []
+    for (ey0, ey1, ex0, ex1) in exclude:
+        excl.append((max(0, ey0), min(H, ey1), max(0, ex0), min(W, ex1)))
+    out = _try(excl)
+    for shrink in (0.75, 0.5, 0.25, 0.0):
+        if out:
+            break
+        shr = []
+        for (ey0, ey1, ex0, ex1) in excl:
+            cy, cx = (ey0 + ey1) / 2, (ex0 + ex1) / 2
+            hy, hx = (ey1 - ey0) / 2 * shrink, (ex1 - ex0) / 2 * shrink
+            shr.append((cy - hy, cy + hy, cx - hx, cx + hx))
+        out = _try(shr)
+    if not out:                       # last resort: no exclusion at all
+        out = _try([])
     return out
 
 
