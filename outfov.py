@@ -90,7 +90,11 @@ OBJECTS = {
 # C evolves while invisible
 C_OMEGA_AFTER = -0.45
 C_HEALTH_AFTER = 0.60
-C_WORLD_DRIFT = np.array([-0.9, 0.10, 0.0])   # world-space motion (units)
+# C evolves while invisible. NOTE: a world-position drift large enough to be
+# interesting also pushes C out of the RETURN view entirely (measured: it never
+# came back), so the "different screen position" requirement is satisfied by the
+# camera returning to a DIFFERENT pose instead (fov_probe: 32 px displacement).
+C_WORLD_DRIFT = np.array([0.0, 0.0, 0.0])     # world-space motion (units)
 DEPTH = 5.0                                   # nominal unprojection depth
 ID_EXIST = 0.60
 VIEW_MARGIN = 0.02
@@ -135,6 +139,47 @@ def make_correction(frame, bb, kind):
 def vram_free_mb():
     free, _ = torch.cuda.mem_get_info()
     return free / 2**20
+
+
+# Validated by fov_probe.py (TRAJECTORY GATE PASS):
+#   baseline 7 vis / continuous OUT 46 chunks (run 8..53) / return 8 vis
+#   uv (0.93,0.25) -> (0.97,0.20) = 32 px displacement, return pose != start
+OC_PHASES = [
+    ("P0_baseline", "hold", 6),
+    ("P1_depart", -1.0, 2),
+    ("P2_holdout", "hold", 40),
+    ("P3_return", +1.0, 6),
+    ("P4_observe", "hold", 8),
+]
+
+
+def build_traj_phases(scene, phases):
+    """P0 baseline | P1 depart | P2 hold-out | P3 return-different | P4 observe.
+
+    The old out-and-back trajectory returned the camera to the exact start pose
+    during the final segment, so the observe window was camera-static and no
+    object could ever leave the frustum. This one really departs, holds, and
+    comes back to a DIFFERENT pose.
+    """
+    p = np.load(f"examples/{scene}/poses.npy")
+    ctl = CameraController(p[0, :3, :3], p[0, :3, 3])
+    ctl.cfg.yaw_rate_max, ctl.cfg.pitch_rate_max, ctl.cfg.v_max = 6.0, 2.0, 1.0
+    frames, cphase = [], []
+    for name, kind, nch in phases:
+        if kind == "hold":
+            cur = ctl.pose.copy()
+            for _ in range(nch * 4):
+                frames.append(cur.copy())
+                cphase.append(name)
+        else:
+            ctl.set_input(yaw=float(kind))
+            for _ in range(nch * 4):
+                ctl.step(dt=0.25)
+                frames.append(ctl.pose.copy())
+                cphase.append(name)
+    traj = np.stack(frames)
+    n = (len(traj) - 1) // 4 * 4 + 1
+    return traj[:n], 2, cphase[:n]
 
 
 def build_traj_tail(scene, total_out, tail):
@@ -203,13 +248,19 @@ def main():
     def dino_np(x):
         return dino_feat(x).detach().cpu().numpy().ravel()
 
-    traj, ref_chunk = build_traj_tail(scene, args.out_chunks, args.tail)
+    traj, ref_chunk, cphase = build_traj_phases(scene, OC_PHASES)
     frames_n = len(traj)
     n_lat = (frames_n - 1) // 4 + 1
-    visit = [0, 1]
-    revisit = [n_lat - args.tail, n_lat - args.tail + 1]
-    observe = list(range(revisit[-1] + 1, n_lat))
-    d = f"examples/of_{scene}_O{args.out_chunks}_T{args.tail}"
+    chunk_phase = [cphase[min(c * 4, len(cphase) - 1)] for c in range(n_lat)]
+    # windows: baseline = P0, observe = P3+P4 (the return), rest is the excursion
+    visit = [c for c in range(n_lat) if chunk_phase[c] == "P0_baseline"]
+    observe = [c for c in range(n_lat)
+               if chunk_phase[c] in ("P3_return", "P4_observe")]
+    revisit = observe
+    d = f"examples/of_{scene}_phased"
+    print(f"[of] trajectory {frames_n} frames -> {n_lat} chunks; "
+          f"baseline {visit[0]}..{visit[-1]}, observe {observe[0]}..{observe[-1]}",
+          flush=True)
     os.makedirs(d, exist_ok=True)
     np.save(f"{d}/poses.npy", traj)
     shutil.copy(f"examples/{scene}/intrinsics.npy", f"{d}/intrinsics.npy")
@@ -237,6 +288,61 @@ def main():
         np.linspace(0, frames_n - 1, n_lat)).to(dev)
     rel_all = compute_relative_poses(c2w, framewise=True)
     timesteps = pipe.scheduler.timesteps[[0, 250, 750]]
+
+    def run(y_cond=None, max_chunks=None):
+        """Plain generation with NO injection -- used for D0 and for the
+        per-object canonicalisation passes."""
+        yc = y if y_cond is None else y_cond
+        self_kv = pipe._initialize_self_kv_cache(
+            num_layers=ma.num_layers, shape=[1, kv_size, lh_, hd],
+            dtype=dtype, device=dev)
+        cross_kv = pipe._initialize_crossattn_cache(
+            num_layers=ma.num_layers, shape=[1, 512, ma.num_heads, hd],
+            dtype=dtype, device=dev)
+        pipe._cross_attn_initialized = False
+        g = torch.Generator(device=dev); g.manual_seed(sd)
+        outs, lats = [], []
+        N = n_lat if max_chunks is None else min(n_lat, max_chunks)
+        for cid in range(N):
+            cur = torch.randn(16, 1, lat_h, lat_w, generator=g, device=dev)
+            p = get_plucker_embeddings(rel_all[cid:cid + 1], Ks[None], h, w)
+            p = rearrange(p, 'f (h c1) (w c2) c -> (f h w) (c c1 c2)',
+                          c1=int(h // lat_h), c2=int(w // lat_w))[None]
+            plk = rearrange(p, 'b (f h w) c -> b c f h w', f=1,
+                            h=lat_h, w=lat_w).to(pdt)
+            kw = {"context": [pipe._t5_cache[key][0]], "seq_len": max_seq_len,
+                  "y": [yc.split(1, dim=1)[min(cid, frames_n // 4 - 1)]],
+                  "dit_cond_dict": {"c2ws_plucker_emb": plk.chunk(1, dim=0)},
+                  "kv_cache": self_kv, "crossattn_cache": cross_kv,
+                  "current_start": cid * fsl,
+                  "max_attention_size": kv_size, "frame_seqlen": fsl}
+            for ti in range(len(timesteps)):
+                with torch.amp.autocast("cuda", dtype=pdt), torch.no_grad():
+                    npred = pipe.model(
+                        x=[cur.to(dev)], t=torch.stack([timesteps[ti]]).to(dev),
+                        cross_attn_first_call=not pipe._cross_attn_initialized,
+                        **kw)[0]
+                    pipe._cross_attn_initialized = True
+                    x0 = pipe._convert_flow_pred_to_x0(
+                        flow_pred=npred, xt=cur, timestep=timesteps[ti],
+                        scheduler=pipe.scheduler)
+                    if ti < len(timesteps) - 1:
+                        cur = pipe.scheduler.add_noise(
+                            x0, torch.randn(x0.shape, generator=g,
+                                            device=x0.device, dtype=x0.dtype),
+                            timesteps[ti + 1])
+            with torch.amp.autocast("cuda", dtype=pdt), torch.no_grad():
+                pipe.model(x=[x0], t=torch.stack([timesteps[-1] * 0.0]).to(dev),
+                           cross_attn_first_call=False, **kw)
+            with torch.no_grad():
+                fr = tae.decode_video(x0.permute(1, 0, 2, 3).unsqueeze(0),
+                                      parallel=False, show_progress_bar=False)
+            outs.append((fr[0][0].permute(1, 2, 0).float().cpu().numpy()
+                         * 255.0).clip(0, 255).astype(np.uint8))
+            lats.append(x0.detach().float().cpu())
+        del self_kv, cross_kv
+        gc.collect(); torch.cuda.empty_cache()
+        return outs, lats
 
     # ---------- world points from the reference ROI centres ----------
     # NOTE: get_Ks_transformed packs intrinsics as [fx, fy, cx, cy], not a 3x3
@@ -281,17 +387,17 @@ def main():
             out[nm] = dict(vis=bool(vis), uv=uv)
         return out
 
-    print("\n[of] ===== frustum membership per chunk (observe window) =====")
+    print("\n[of] ===== frustum membership per chunk (FULL sequence) =====")
     vis_log = {}
-    for cid in observe:
+    for cid in range(n_lat):
         vis_log[cid] = visibility(cid)
     for nm in names:
-        seq = [cid for cid in observe if vis_log[cid][nm]["vis"]]
-        gone = [cid for cid in observe if not vis_log[cid][nm]["vis"]]
-        print(f"     {nm:>8s}: visible {len(seq)}/{len(observe)} chunks"
+        seq = [cid for cid in range(n_lat) if vis_log[cid][nm]["vis"]]
+        gone = [cid for cid in range(n_lat) if not vis_log[cid][nm]["vis"]]
+        print(f"     {nm:>8s}: visible {len(seq)}/{n_lat} chunks"
               + (f", first out {gone[0]}" if gone else ""), flush=True)
     tgt = [nm for nm in names if OBJECTS[nm]["target"]][0]
-    tgt_gone = [cid for cid in observe if not vis_log[cid][tgt]["vis"]]
+    tgt_gone = [cid for cid in range(n_lat) if not vis_log[cid][tgt]["vis"]]
     print(f"[of] TARGET {tgt}: genuinely out-of-FOV for {len(tgt_gone)} chunks",
           flush=True)
     print(f"[of] requested invisibility {args.invisible} chunks", flush=True)
@@ -323,14 +429,19 @@ def main():
     print(f"[of] setup done, free {vram_free_mb():.0f}MiB", flush=True)
 
     def lat_roi(nm, uv):
-        """Projected normalised (u,v) -> latent roi of the object's own size."""
-        bb = OBJECTS[nm]
-        hw = (bb["bb"][2] - bb["bb"][0]) * lat_w / 2.0
-        hh = (bb["bb"][3] - bb["bb"][1]) * lat_h / 2.0
+        """Projected normalised (u,v) -> latent roi sized to the ANCHOR.
+
+        Using the nominal bb size plus int(round()) on both edges makes the window
+        drift by +-1 latent unit, which then mismatches the anchor tensor. So we
+        place the top-left corner from the projection and derive the extent from
+        the anchor itself.
+        """
+        ah, aw = A_anc[nm].shape[2], A_anc[nm].shape[3]
         cx = uv[0] * lat_w
         cy = uv[1] * lat_h
-        return (int(round(cy - hh)), int(round(cy + hh)),
-                int(round(cx - hw)), int(round(cx + hw)))
+        b0 = int(round(cx - aw / 2.0))
+        a0 = int(round(cy - ah / 2.0))
+        return (a0, a0 + ah, b0, b0 + aw)
 
     # ---------- anchors ----------
     print("\n[of] === D0 (no injection) ===", flush=True)
@@ -426,14 +537,29 @@ def main():
     world = {nm: WORLD[nm].copy() for nm in names}
 
     tgt = [nm for nm in names if OBJECTS[nm]["target"]][0]
-    tgt_gone = sorted(cid for cid in observe if not vis_log[cid][tgt]["vis"])
-    tgt_vis = sorted(cid for cid in observe if vis_log[cid][tgt]["vis"])
-    print(f"\n[of] TARGET {tgt}: out-of-FOV chunks = {tgt_gone}", flush=True)
-    print(f"[of]   first visible {tgt_vis[0]}, last visible before exit "
-          f"{max(c for c in tgt_vis if c < max(tgt_gone)) if tgt_gone else 'n/a'}",
+    # FULL-sequence membership (the exit happens during P1/P2, the return in
+    # P3/P4 -- restricting this to the observe window would miss the exit)
+    tgt_gone = sorted(cid for cid in range(n_lat) if not vis_log[cid][tgt]["vis"])
+    tgt_vis = sorted(cid for cid in range(n_lat) if vis_log[cid][tgt]["vis"])
+    # longest strictly-continuous out run
+    _best, _cur = [], []
+    for cid in range(n_lat):
+        if not vis_log[cid][tgt]["vis"]:
+            _cur.append(cid)
+        else:
+            if len(_cur) > len(_best):
+                _best = _cur
+            _cur = []
+    if len(_cur) > len(_best):
+        _best = _cur
+    tgt_run = _best
+    print(f"\n[of] TARGET {tgt}: out-of-FOV chunks = {len(tgt_gone)}", flush=True)
+    print(f"[of]   continuous out run = {tgt_run[0]}..{tgt_run[-1]} "
+          f"({len(tgt_run)} chunks = {len(tgt_run)*0.25:.2f}s)", flush=True)
+    print(f"[of]   baseline visible {tgt_vis[0]}.."
+          f"{max(c for c in tgt_vis if c < tgt_run[0])}, "
+          f"return visible from {min(c for c in tgt_vis if c > tgt_run[-1])}",
           flush=True)
-    print(f"[of]   longest continuous invisible run = "
-          f"{len(tgt_gone)} chunks ({len(tgt_gone)*0.25:.2f}s)", flush=True)
     print(f"[of] state evolution while invisible: omega "
           f"{OBJECTS[tgt]['omega']:+.2f} -> {C_OMEGA_AFTER:+.2f}, health "
           f"{OBJECTS[tgt]['health']:.2f} -> {C_HEALTH_AFTER:.2f}, "
@@ -491,7 +617,7 @@ def main():
                                         device=x0.device, dtype=x0.dtype),
                         timesteps[ti + 1])
         x0 = x0.clone()
-        if cid in visit or cid in revisit or cid in observe:
+        if True:
             for nm in names:
                 Xw = world[nm]
                 uv = project(Xw, cid)
@@ -528,7 +654,8 @@ def main():
     print("\n[of] ===== per-chunk =====")
     print(f"  {'chunk':>5s} " + " ".join(f"{n[:10]:>28s}" for n in names))
     rows = []
-    for cid in observe:
+    SEQ = list(range(n_lat))
+    for cid in SEQ:
         line = f"  {cid:5d} "
         for nm in names:
             Xw = world[nm]
