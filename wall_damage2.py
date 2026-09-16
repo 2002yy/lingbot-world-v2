@@ -188,6 +188,12 @@ def main():
     ap.add_argument("--canon_chunks", type=int, default=4)
     ap.add_argument("--hit_every", type=int, default=2,
                     help="apply one damage event every N observe chunks")
+    ap.add_argument("--no_damage", action="store_true",
+                    help="MATCHED CONTROL: identical seed / initial frame / "
+                         "camera sequence / chunk count / refresh strategy / "
+                         "renderer and anchor logic, but NO damage, NO stage "
+                         "crossing and NO damage-anchor canonicalisation. "
+                         "Measures the system's own neighbourhood drift.")
     ap.add_argument("--area", default="512x320")
     ap.add_argument("--tae_pth", default=os.path.expanduser("~/ai/taehv/taew2_1.pth"))
     ap.add_argument("--out_dir", default="output/damage2")
@@ -350,13 +356,22 @@ def main():
     ref_frame = D0_frames[ref_chunk]
     A = {"intact": D0_lat[ref_chunk][:, :, wy0:wy1, wx0:wx1].clone().to(dev)}
     TPL = {"intact": patch(ref_frame, WALL_BB)}
-    for k in ("damaged", "critical", "destroyed"):
-        print(f"[d2] === canonicalise {k} ({args.canon_chunks} chunks) ===",
-              flush=True)
-        f, l = run(ys[k], None, max_chunks=args.canon_chunks)
-        ci = min(2, args.canon_chunks - 1)
-        A[k] = l[ci][:, :, wy0:wy1, wx0:wx1].clone().to(dev)
-        TPL[k] = patch(f[ci], WALL_BB)
+    if args.no_damage:
+        # matched control: the damaged/critical/destroyed anchors are never
+        # reached, so skip their canonicalisation (they cannot influence the
+        # main render -- different y_cond, and they run before it)
+        for k in ("damaged", "critical", "destroyed"):
+            A[k] = A["intact"]
+            TPL[k] = TPL["intact"]
+        print("[d2] MATCHED CONTROL: no damage, no canonicalisation", flush=True)
+    else:
+        for k in ("damaged", "critical", "destroyed"):
+            print(f"[d2] === canonicalise {k} ({args.canon_chunks} chunks) ===",
+                  flush=True)
+            f, l = run(ys[k], None, max_chunks=args.canon_chunks)
+            ci = min(2, args.canon_chunks - 1)
+            A[k] = l[ci][:, :, wy0:wy1, wx0:wx1].clone().to(dev)
+            TPL[k] = patch(f[ci], WALL_BB)
     torch.save({k: v.cpu() for k, v in A.items()},
                f"{args.out_dir}/stage_anchors.pt")
 
@@ -381,7 +396,8 @@ def main():
                                    feature=dino_np(TPL[k]))
 
     # ---------- gameplay schedule ----------
-    hits_at = {c: 1 for c in observe if (c - observe[0]) % args.hit_every == 0}
+    hits_at = {} if args.no_damage else \
+        {c: 1 for c in observe if (c - observe[0]) % args.hit_every == 0}
     print(f"\n[d2] damage schedule: {len(hits_at)} events, "
           f"{DAMAGE_PER_HIT}/hit, one every {args.hit_every} observe chunks",
           flush=True)
