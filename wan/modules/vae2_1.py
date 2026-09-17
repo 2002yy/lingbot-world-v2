@@ -565,6 +565,118 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return out
 
+    def stream_decode_start(self, scale):
+        """Begin a persistent causal streaming decode session.
+
+        Unlike decode(), decoder caches (_feat_map) are kept across
+        stream_decode_step() calls, so each latent chunk is decoded as a
+        continuation of the previous one rather than a fresh sequence start.
+        """
+        self.clear_cache()
+        self._stream_scale = scale
+
+    def stream_decode_step(self, z):
+        """Decode one latent chunk [b,c,t,h,w]; returns RGB [b,3,4t,H,W]."""
+        scale = self._stream_scale
+        if isinstance(scale[0], torch.Tensor):
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            z = z / scale[1] + scale[0]
+        x = self.conv2(z)
+        outs = []
+        for i in range(x.shape[2]):
+            self._conv_idx = [0]
+            outs.append(
+                self.decoder(
+                    x[:, :, i:i + 1, :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx))
+        return torch.cat(outs, dim=2) if len(outs) > 1 else outs[0]
+
+    def stream_decode_end(self):
+        self.clear_cache()
+        self._stream_scale = None
+
+    # ---- spatially tiled streaming decode (low-VRAM) ----
+    # Only the spatial dims are split; the temporal dim is always kept whole so
+    # temporal consistency and the causal caches are unaffected. Tiles overlap
+    # and are merged with linear feather weights (overlap sums to 1).
+
+    def stream_decode_start_tiled(self, scale, tile_h, tile_w, overlap):
+        self.clear_cache()
+        self._stream_scale = scale
+        self._tile_cfg = (int(tile_h), int(tile_w), int(overlap))
+        self._tile_grid = None
+        self._tile_caches = None
+
+    def _build_tiles(self, H, W):
+        th, tw, ov = self._tile_cfg
+        th, tw = min(th, H), min(tw, W)
+
+        def starts(n, t, o):
+            if t >= n:
+                return [0]
+            # smallest number of tiles whose overlap is >= o, evenly spaced
+            k = max(1, -(-(n - o) // max(1, t - o)))
+            if k == 1:
+                return [0]
+            return [int(round(i * (n - t) / (k - 1))) for i in range(k)]
+
+        grid = []
+        for h0 in starts(H, th, ov):
+            for w0 in starts(W, tw, ov):
+                grid.append((h0, min(h0 + th, H), w0, min(w0 + tw, W)))
+        return grid
+
+    @staticmethod
+    def _ramp(n, lo, hi, ov):
+        w = torch.ones(n)
+        if ov > 0 and n > ov:
+            r = torch.linspace(0, 1, ov + 2)[1:-1]
+            if lo > 0:
+                w[:ov] = r
+            if hi < n:
+                w[-ov:] = r.flip(0)
+        return w
+
+    def stream_decode_step_tiled(self, z):
+        scale = self._stream_scale
+        if isinstance(scale[0], torch.Tensor):
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            z = z / scale[1] + scale[0]
+        x = self.conv2(z)
+        H, W = x.shape[-2], x.shape[-1]
+        if self._tile_grid is None:
+            self._tile_grid = self._build_tiles(H, W)
+            self._tile_caches = [[None] * self._conv_num for _ in self._tile_grid]
+        s = 8  # spatial upsampling factor of the decoder
+        OH, OW = H * s, W * s
+        acc = wsum = None
+        _, _, ov = self._tile_cfg
+        for ti, (h0, h1, w0, w1) in enumerate(self._tile_grid):
+            xt = x[:, :, :, h0:h1, w0:w1]
+            outs = []
+            for i in range(xt.shape[2]):
+                self._conv_idx = [0]
+                outs.append(self.decoder(xt[:, :, i:i + 1, :, :],
+                                         feat_cache=self._tile_caches[ti],
+                                         feat_idx=self._conv_idx))
+            ot = torch.cat(outs, dim=2) if len(outs) > 1 else outs[0]
+            if acc is None:
+                acc = torch.zeros(ot.shape[0], 3, ot.shape[2], OH, OW,
+                                  device=x.device, dtype=x.dtype)
+                wsum = torch.zeros(1, 1, 1, OH, OW, device=x.device, dtype=x.dtype)
+            oh, ow = ot.shape[-2], ot.shape[-1]
+            wh = self._ramp(oh, h0, h1, ov * s).to(x.device, x.dtype)
+            ww = self._ramp(ow, w0, w1, ov * s).to(x.device, x.dtype)
+            w2 = (wh[:, None] * ww[None, :])[None, None, None]
+            acc[:, :, :, h0 * s:h1 * s, w0 * s:w1 * s] += ot * w2
+            wsum[:, :, :, h0 * s:h1 * s, w0 * s:w1 * s] += w2
+        return acc / wsum.clamp_min(1e-6)
+
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
@@ -640,7 +752,7 @@ class Wan2_1_VAE:
         self.model = _video_vae(
             pretrained_path=vae_pth,
             z_dim=z_dim,
-        ).eval().requires_grad_(False).to(device)
+        ).eval().requires_grad_(False).to(device=device, dtype=dtype)
 
     def encode(self, videos):
         """
@@ -659,3 +771,28 @@ class Wan2_1_VAE:
                                   self.scale).float().clamp_(-1, 1).squeeze(0)
                 for u in zs
             ]
+
+    def stream_decode_start(self):
+        """Start a persistent causal streaming decode session."""
+        with amp.autocast(dtype=self.dtype):
+            self.model.stream_decode_start(self.scale)
+
+    def stream_decode_step(self, z):
+        """Decode one latent chunk [C,T,H,W]; returns RGB [C,4T,H,W]."""
+        with amp.autocast(dtype=self.dtype):
+            return self.model.stream_decode_step(
+                z.unsqueeze(0)).float().clamp_(-1, 1).squeeze(0)
+
+    def stream_decode_end(self):
+        self.model.stream_decode_end()
+
+    def stream_decode_start_tiled(self, tile_h, tile_w, overlap):
+        """Low-VRAM streaming decode: spatial tiles only, temporal dim whole."""
+        with amp.autocast(dtype=self.dtype):
+            self.model.stream_decode_start_tiled(self.scale, tile_h, tile_w,
+                                                 overlap)
+
+    def stream_decode_step_tiled(self, z):
+        with amp.autocast(dtype=self.dtype):
+            return self.model.stream_decode_step_tiled(
+                z.unsqueeze(0)).float().clamp_(-1, 1).squeeze(0)

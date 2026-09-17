@@ -142,9 +142,25 @@ def load_dit_model(model_cls, checkpoint_dir, subfolder, config, torch_dtype,
         f"config.json not found in {dit_dir}; building {model_cls.__name__} "
         "from the task config and loading safetensors weights."
     )
-    model = model_cls(**_dit_kwargs_from_config(config, extra))
+    _prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch_dtype)
+    try:
+        model = model_cls(**_dit_kwargs_from_config(config, extra))
+    finally:
+        torch.set_default_dtype(_prev_dtype)
+    from safetensors.torch import load_file
+    index_path = os.path.join(dit_dir, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            index = json.load(f)
+        for shard in sorted(set(index["weight_map"].values())):
+            sd = load_file(os.path.join(dit_dir, shard))
+            model.load_state_dict(sd, strict=False)
+            del sd
+        return model.to(dtype=torch_dtype)
     state = _load_safetensors_state_dict(dit_dir)
     missing, unexpected = model.load_state_dict(state, strict=False)
+    del state
     if missing:
         logging.warning(f"Missing keys when loading DiT: {missing}")
     if unexpected:
@@ -245,7 +261,8 @@ class WanI2VCausal:
         self.vae = Wan2_1_VAE(
             vae_pth=_resolve_asset_path(
                 config.vae_checkpoint, checkpoint_dir, assets_dir),
-            device=self.device)
+            device=self.device,
+            dtype=torch.bfloat16)
 
         if self.infer_mode == "causal_fast":
             self.model = load_dit_model(
@@ -273,6 +290,10 @@ class WanI2VCausal:
             dit_fsdp=dit_fsdp,
             shard_fn=shard_fn,
             convert_model_dtype=convert_model_dtype).to(self.device)
+
+        if os.getenv("LINGBOT_FP8", "0") == "1":
+            from lingbot_fp8 import apply_selective_fp8
+            apply_selective_fp8(self.model)
 
         self.scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=self.num_train_timesteps,
@@ -693,11 +714,19 @@ class WanI2VCausal:
         len_c2ws = len(c2ws)
         len_c2ws_ = int((len_c2ws - 1) // 4) + 1
         len_c2ws_ = int(len_c2ws_ - (len_c2ws_ % chunk_size))
+        # Camera-conditioning sampling grid. The model conditions on one pose per
+        # latent (= 4 output frames); by default the pose is taken at the START of
+        # the window, which makes the generated motion trail the intended
+        # trajectory by ~2 frames (measured). LINGBOT_POSE_OFFSET shifts the grid
+        # in source frames to compensate.
+        _pose_off = int(os.getenv("LINGBOT_POSE_OFFSET", "0"))
+        _tgt = np.linspace(0, len_c2ws - 1, len_c2ws_) + _pose_off
+        _tgt = np.clip(_tgt, 0, len_c2ws - 1)
         c2ws_infer = interpolate_camera_poses(
             src_indices=np.linspace(0, len_c2ws - 1, len_c2ws),
             src_rot_mat=c2ws[:, :3, :3],
             src_trans_vec=c2ws[:, :3, 3],
-            tgt_indices=np.linspace(0, len_c2ws - 1, len_c2ws_),
+            tgt_indices=_tgt,
         )
         c2ws_infer = compute_relative_poses(c2ws_infer, framewise=True)
         Ks = Ks.repeat(len(c2ws_infer), 1)
