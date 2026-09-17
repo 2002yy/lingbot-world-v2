@@ -130,12 +130,17 @@ def main():
     m1 = np.array([r["single_margin"] for r in rows])
     m2 = np.array([r["multi_margin"] for r in rows])
     print(f"\n[mv] ===== summary =====")
+    print("  NOTE on two similarly named metrics:")
+    print("    per-angle 'exist'   = fraction of CHUNKS in that run with self >= 0.60")
+    print("    summary 'angle-pass'= fraction of ANGLES whose MEAN self >= 0.60")
     print(f"  single anchor : self {s1.mean():.3f} (min {s1.min():.3f})  "
           f"margin {m1.mean():+.3f} (min {m1.min():+.3f})  "
-          f"exist-pass {np.mean(s1>=ID_EXIST)*100:.0f}%")
+          f"angle-pass {int((s1>=ID_EXIST).sum())}/{len(s1)} = "
+          f"{np.mean(s1>=ID_EXIST)*100:.0f}%")
     print(f"  multi bank    : self {s2.mean():.3f} (min {s2.min():.3f})  "
           f"margin {m2.mean():+.3f} (min {m2.min():+.3f})  "
-          f"exist-pass {np.mean(s2>=ID_EXIST)*100:.0f}%")
+          f"angle-pass {int((s2>=ID_EXIST).sum())}/{len(s2)} = "
+          f"{np.mean(s2>=ID_EXIST)*100:.0f}%")
     print(f"\n  self   delta  : {s2.mean()-s1.mean():+.3f}")
     print(f"  margin delta  : {m2.mean()-m1.mean():+.3f}")
     print(f"  worst-case self: single {s1.min():.3f} -> multi {s2.min():.3f}")
