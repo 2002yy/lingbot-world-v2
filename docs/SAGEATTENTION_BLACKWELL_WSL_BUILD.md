@@ -224,15 +224,73 @@ multiplying build time, disk and failure surface for GPUs we do not have.
 
 ## 7. Runtime configuration
 
-Dispatch lives in `wan/modules/sage_backend.py`. Select with:
+There are TWO modes, and the distinction is not cosmetic — it is the main
+finding of this investigation. See `wan/perf_mode.py` for the full evidence.
 
 ```
-LINGBOT_ATTN_BACKEND = fa2 | sdpa | sage | hybrid      (default fa2)
-LINGBOT_SAGE_MIN_KV  = KV length above which self-attention uses Sage
-                       (hybrid only; measured crossover 1881 < x < 2508)
+LINGBOT_MODE            repro | fast        (default: repro)
+  repro   backend=fa2    compile=0           exact-trajectory reproduction
+  fast    backend=hybrid compile=1           ~7% faster, different trajectory
+
+LINGBOT_ATTN_BACKEND    fa2 | sdpa | sage | hybrid   per-field override
+LINGBOT_COMPILE         0 | 1                        per-field override
+LINGBOT_COMPILE_MODE    default                      Inductor only
+LINGBOT_SAGE_MIN_KV     KV length above which hybrid uses Sage (default 2508)
 ```
 
-`hybrid` is the measured winner:
+### Why the split exists
+
+Long-horizon testing (65 chunks ≈ 16 s of world time, scene 04, seed 42) showed
+that the accelerated backends do **not** merely render the same world with
+different texture — after roughly 32 chunks they produce a **different world**:
+
+| | LPIPS @48-64 | SSIM | edge-SSIM | DINO cosine |
+|---|---|---|---|---|
+| B (hybrid, eager) vs FA2 | 0.4701 | 0.3646 | 0.2971 | 0.5176 |
+| D (hybrid, compile) vs FA2 | 0.5207 | 0.3117 | 0.2560 | 0.6521 |
+
+Crucially, **disabling compile does not fix this** — B and D are the same order.
+The cause is the attention numerical path itself: FA2 is bit-for-bit
+deterministic (two identical runs give PSNR 100.00 / LPIPS 0.0000), but the
+recurrent rollout amplifies *any* perturbation to it. A zero-dependency SDPA
+swap would be expected to behave the same way.
+
+So "faster" and "seed-reproducible" are mutually exclusive here, and the honest
+framing is: the fast backends are not wrong, they generate a different but
+equally plausible trajectory.
+
+### Observed boundary — NOT a guarantee
+
+```
+~20 chunks : structure preserved          (tested scene/seed only)
+~32 chunks : structural divergence observed
+```
+
+This comes from **one seed in one scene**. It is *not* a universal safe rollout
+length and must not be enforced as one without a multi-seed, multi-scene sweep.
+
+### `compile` is Inductor, not CUDA Graph
+
+`LINGBOT_COMPILE_MODE=default` means ordinary Inductor optimisation. It is not
+`reduce-overhead` and not CUDA Graph. CUDA Graph is a separate, closed line:
+CUDAGraph Trees skips capture because the KV cache is a mutated eager input
+(`skipping cudagraphs due to mutated inputs` at `crossattn_cache["k"].copy_(k)`),
+`cudagraph_support_input_mutation` already defaults to True and only covers
+mutations "from prior cudagraph pool", and forcing capture dies in
+`_cuda_setCheckpointPoolState` (`Expected curr_block->next == nullptr`).
+
+### Always-on, no tradeoff: the host-sync refactor
+
+Independent of the above, the KV-cache position bookkeeping
+(`global_end_index` / `local_end_index` / `is_init`) is stored as plain Python
+ints/bools rather than CUDA tensors. That removes a `.item()` CPU↔GPU sync per
+layer per forward. Strict same-process paired measurement: **−3.1%, bit-exact**
+(identical latent hash). This carries no reproducibility cost and is retained in
+both modes.
+
+### The hybrid dispatch rule
+
+`hybrid` sends each path to its measured winner:
 
 ```
 long-window self  (Lkv >= 2508) -> SageAttention
@@ -240,8 +298,8 @@ cross-attention                 -> SDPA
 short self                      -> SDPA
 ```
 
-Measured on this machine, per-call median (RTX 5060, bf16, all tensors already
-contiguous NHD — **zero layout conversion cost**):
+Measured per-call median (RTX 5060, bf16; all call sites already hand over
+contiguous NHD tensors, so **layout cost is exactly zero**):
 
 | shape | FA2 | SDPA | Sage | best |
 |---|---|---|---|---|
@@ -254,9 +312,21 @@ contiguous NHD — **zero layout conversion cost**):
 | 627x512 cross | 0.2570 | **0.1216** | 0.1455 | SDPA |
 
 Two things worth remembering: **flash-attn 2 is the slowest option at every
-shape this model uses**, and Sage only wins where the KV window is long — so
-running Sage at short KV or on cross-attention is strictly worse (slower *and*
-more quantisation).
+shape this model uses** (SDPA beats it by 22–53%), and Sage only wins where the
+KV window is long — so running Sage at short KV or on cross-attention is
+strictly worse (slower *and* more quantisation). Using Sage for only ~43% of
+calls beats using it for all of them.
+
+### Measured end-to-end
+
+```
+FA2 + eager           858.7 ms   0%        reproducible
+Hybrid + eager        810.6 ms   -5.61%    different trajectory
+Hybrid + compile      798.5 ms   -7.02%    different trajectory
+```
+
+VRAM delta: **zero** (peak 2978/3114 MiB identical across all arms), and
+attention is only ~50 ms/chunk of a ~800 ms chunk, so this is a bounded win.
 
 ---
 

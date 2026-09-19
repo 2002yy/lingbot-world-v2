@@ -331,6 +331,20 @@ class WanI2VCausal:
         self._py_cache_meta: bool = (
             infer_mode == "causal_fast" and self.sp_size == 1)
 
+        # Apply the performance preset LAST, so every earlier lookup on the
+        # original model (config, dtype, module shape) has already happened and
+        # torch.compile's wrapper cannot interfere with them.
+        #
+        #   LINGBOT_MODE=repro (default) -> fa2 + eager, exact trajectory
+        #   LINGBOT_MODE=fast            -> hybrid + compile, ~7% faster but the
+        #                                   recurrent rollout diverges from the
+        #                                   fa2 trajectory after ~32 chunks
+        # See wan/perf_mode.py for the measurements behind that split.
+        from wan import perf_mode
+        self.perf_mode = perf_mode.resolve()
+        self.model = perf_mode.apply(self.model, self.perf_mode,
+                                     log=lambda m: print(m, flush=True))
+
     def clear_text_cache(self):
         """Drop all cached T5 prompt embeddings. Frees ~4 MB per entry."""
         self._t5_cache.clear()
