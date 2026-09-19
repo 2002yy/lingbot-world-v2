@@ -319,6 +319,18 @@ class WanI2VCausal:
         # crossattn_cache["is_init"].item() sync inside WanCrossAttention.
         self._cross_attn_initialized: bool = False
 
+        # Store KV-cache position bookkeeping (global_end_index /
+        # local_end_index / is_init) as plain Python ints/bools rather than CUDA
+        # tensors. Measured ~10% faster per chunk, bit-exact, because the tensor
+        # form forced a .item() CPU<->GPU sync per layer per forward.
+        #
+        # Scoped to the causal-fast, single-GPU path: the sequence-parallel
+        # attention kernels still read these through `.item()`. `model_fast.py`
+        # and `model_causal.py` accept either form, so this only decides what we
+        # write, never how it is read.
+        self._py_cache_meta: bool = (
+            infer_mode == "causal_fast" and self.sp_size == 1)
+
     def clear_text_cache(self):
         """Drop all cached T5 prompt embeddings. Frees ~4 MB per entry."""
         self._t5_cache.clear()
@@ -403,12 +415,14 @@ class WanI2VCausal:
             num_layers=cfg.num_layers,
             shape=[1, kv_size, local_num_heads, head_dim],
             dtype=transformer_dtype,
-            device=self.device)
+            device=self.device,
+            python_metadata=self._py_cache_meta)
         warmup_cross_kv = self._initialize_crossattn_cache(
             num_layers=cfg.num_layers,
             shape=[1, text_seq_len, cfg.num_heads, head_dim],
             dtype=transformer_dtype,
-            device=self.device)
+            device=self.device,
+            python_metadata=self._py_cache_meta)
 
         # `y` is concat([msk_4ch, vae_latent_16ch]) → 20 channels; combined
         # with latent's 16 ch at patch-embed concat, the DiT sees 36 ch in.
@@ -786,12 +800,14 @@ class WanI2VCausal:
         self_kv_cache = self._initialize_self_kv_cache(num_layers=model_args.num_layers,
                                                        shape=self_kv_shape,
                                                        dtype=transformer_dtype,
-                                                       device=self.device)
+                                                       device=self.device,
+                                                       python_metadata=self._py_cache_meta)
         cross_kv_shape = [batch_size, max_sequence_length, model_args.num_heads, head_dim]
         cross_kv_cache = self._initialize_crossattn_cache(num_layers=model_args.num_layers,
                                                           shape=cross_kv_shape,
                                                           dtype=transformer_dtype,
-                                                          device=self.device)
+                                                          device=self.device,
+                                                          python_metadata=self._py_cache_meta)
         # evaluation mode
         with (
                 torch.amp.autocast('cuda', dtype=self.param_dtype),
@@ -1148,32 +1164,59 @@ class WanI2VCausal:
 
         return videos[0] if self.rank == 0 else None
 
-    def _initialize_self_kv_cache(self, num_layers, shape, dtype, device):
+    def _initialize_self_kv_cache(self, num_layers, shape, dtype, device,
+                                 python_metadata=False):
         """
         Initialize a Per-GPU KV cache for the SelfAttn.
+
+        `python_metadata=True` stores `global_end_index` / `local_end_index` as
+        plain Python ints instead of CUDA tensors. They are pure Python
+        bookkeeping: `current_start` (the only other position input) is already
+        an int, so nothing in the update needs a device tensor. As tensors they
+        cost a CPU<->GPU sync per layer per forward (`.item()`) and required an
+        in-place `.fill_()` write-back. Both are pure overhead here; the
+        `.fill_()` is also an in-place mutation that interacts badly with CUDA
+        Graph capture.
+
+        Defaults to False so the contract of existing callers (including the
+        sequence-parallel path, which reads these through `.item()`) is
+        unchanged. `model_fast.py` and `model_causal.py` accept either form.
         """
         self_kv_cache = []
         for _ in range(num_layers):
+            if python_metadata:
+                gei, lei = 0, 0
+            else:
+                gei = torch.tensor([0], dtype=torch.long, device=device)
+                lei = torch.tensor([0], dtype=torch.long, device=device)
             self_kv_cache.append({
                 'k': torch.zeros(shape, dtype=dtype, device=device),
                 'v': torch.zeros(shape, dtype=dtype, device=device),
-                'global_end_index': torch.tensor([0], dtype=torch.long, device=device),
-                'local_end_index': torch.tensor([0], dtype=torch.long, device=device)
+                'global_end_index': gei,
+                'local_end_index': lei
             })
 
         return self_kv_cache
 
 
-    def _initialize_crossattn_cache(self, num_layers, shape, dtype, device):
+    def _initialize_crossattn_cache(self, num_layers, shape, dtype, device,
+                                   python_metadata=False):
         """
         Initialize a per-GPU cross-attention cache.
+
+        `python_metadata=True` stores `is_init` as a plain Python bool (the same
+        convention `_initialize_crossattn_cache_pretrain` already documents).
+        As a CUDA tensor it forced a `.item()` sync per layer per forward, and
+        the `.fill_()` write-back blocked CUDA Graph capture. Defaults to False
+        to leave other callers' contract unchanged.
         """
         crossattn_cache = []
         for _ in range(num_layers):
             crossattn_cache.append({
                 'k': torch.zeros(shape, dtype=dtype, device=device),
                 'v': torch.zeros(shape, dtype=dtype, device=device),
-                'is_init': torch.tensor(0, dtype=torch.int32, device=device),
+                'is_init': False if python_metadata
+                          else torch.tensor(0, dtype=torch.int32, device=device),
             })
 
         return crossattn_cache
