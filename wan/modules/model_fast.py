@@ -12,6 +12,25 @@ import torch.nn.functional as torch_F
 # Caching is bit-exact, so this is ON by default; LINGBOT_CAM_CACHE=0 disables.
 import os as _os
 _CAM_CACHE = _os.environ.get("LINGBOT_CAM_CACHE", "1") not in ("0", "false", "False")
+
+# Camera-cache epoch. The cache key cannot be derived from the input tensor:
+# WanModelFast.forward rebuilds `c2ws_plucker_emb` on EVERY forward (rearrange ->
+# cat -> patch_embedding -> add), so a new tensor with a different data_ptr is
+# passed each time and identity-based keys never hit. `current_start` alone is
+# also insufficient, because pipe.prewarm() runs a dummy forward at
+# current_start 0 with dummy camera values and would poison the real
+# generation's chunk 0.
+#
+# So the pipeline bumps an explicit epoch at the start of prewarm() and of every
+# generate(); the key is (epoch, current_start), which is stable across the
+# forwards within a chunk and distinct across prewarm / generations.
+_CAM_EPOCH = [0]
+
+
+def bump_cam_epoch():
+    """Invalidate all camera caches. Call at the start of prewarm/generate."""
+    _CAM_EPOCH[0] += 1
+    return _CAM_EPOCH[0]
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from wan.modules.attention import attention
@@ -343,19 +362,12 @@ class CausalWanAttentionBlock(nn.Module):
             # recomputation. Caching is bit-exact -- same input, same weights,
             # identical output -- so it needs no rollout gate and is enabled by
             # default. Set LINGBOT_CAM_CACHE=0 to disable.
-            key = current_start
+            # Key = (epoch, position). Stable across the 4 forwards of a chunk
+            # (same epoch, same current_start) and distinct across prewarm and
+            # successive generate() calls. See _CAM_EPOCH above for why neither
+            # the tensor identity nor current_start alone is sufficient.
+            key = (_CAM_EPOCH[0], current_start)
             cache = getattr(self, "_cam_cache", None)
-            if key == 0 and cache is not None and cache[0] != 0:
-                # A new generation: chunk 0 always starts one, so seeing
-                # current_start == 0 after a NON-zero key means we wrapped
-                # around. Note the `cache[0] != 0` test: resetting on key == 0
-                # alone also fired on forwards 1..3 of chunk 0 itself, which
-                # silently threw away the cache for the whole first chunk
-                # (measured: each cam module ran 210 times over 4 chunks where
-                # 120 was expected). This test keeps chunk 0 cached while still
-                # invalidating across generate() calls.
-                cache = None
-                self._cam_cache = None
             if _CAM_CACHE and cache is not None and cache[0] == key:
                 cam_scale, cam_shift = cache[1], cache[2]
             else:

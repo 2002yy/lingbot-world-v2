@@ -399,6 +399,13 @@ class WanI2VCausal:
         if getattr(self, "_warmed", False):
             return
 
+        # Invalidate the camera-injection cache before this dummy forward. It
+        # runs at current_start 0 with dummy camera values, and without a new
+        # epoch it would poison the real generation's chunk 0 -- silently when
+        # the shapes match, with a tensor-size error when they do not.
+        from wan.modules.model_fast import bump_cam_epoch
+        bump_cam_epoch()
+
         cfg = self.config
 
         # Match generate()'s shape derivation exactly.
@@ -661,6 +668,13 @@ class WanI2VCausal:
             batch_size = 1
         
         assert action_path is not None, "action_path is required"
+
+        # New camera-cache epoch: chunk 0 of a fresh generation reuses
+        # current_start == 0, so without this the previous generation's (or
+        # prewarm's) entry would be reused. See wan/modules/model_fast.py.
+        from wan.modules.model_fast import bump_cam_epoch
+        bump_cam_epoch()
+
         c2ws = np.load(os.path.join(action_path, "poses.npy")) # opencv coordinate
         len_c2ws = ((len(c2ws) - 1) // 4) * 4 + 1
         frame_num = ((frame_num - 1) // 4) * 4 + 1

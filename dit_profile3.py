@@ -193,6 +193,11 @@ def main():
           f"(expect Linear M = {max_seq_len})", flush=True)
     pipe.prewarm(img_pil, max_area=W * H, frame_num=frames_n,
                  chunk_size=CS)
+    # prewarm runs a dummy forward at current_start 0 which would
+    # otherwise populate the camera cache and poison chunk 0 of the
+    # real loop below; the harness does not go through generate().
+    from wan.modules.model_fast import bump_cam_epoch
+    bump_cam_epoch()
     Ks = get_Ks_transformed(
         torch.from_numpy(np.load(f"{d}/intrinsics.npy")).float(),
         480, 832, h, w, h, w)[0].to(dev)
