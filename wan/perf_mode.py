@@ -113,3 +113,59 @@ def apply(model, eff=None, log=print):
         return model
     import torch
     return torch.compile(model, mode=eff["compile_mode"], fullgraph=False)
+
+
+# --------------------------------------------------------------------------
+# P2a: selective FFN up-projection in rowwise FP8
+# --------------------------------------------------------------------------
+# Measured at M=1881 on this machine, per call:
+#
+#     ffn.0 up   (K=1536 N=8960)  bf16 1.6260 | weight-only 2.7110 | rowwise 1.1058
+#     ffn.2 down (K=8960 N=1536)  bf16 1.6896 | weight-only 2.7811 | rowwise 2.4603
+#
+# The production path uses weight-only FP8, so the real lever on ffn.0 is
+# 2.7110 -> 1.1058, i.e. 1.6052 ms/call. At 120 calls per chunk that projects to
+# ~193 ms/chunk, about -12.7% of the 1524.5 ms production baseline -- roughly
+# twice what comparing against bf16 would suggest. The down-projection is left
+# alone because rowwise loses there (narrow N=1536 cannot amortise the
+# quantisation).
+#
+# This CHANGES the numerical path, so it is a fast-mode-class lever: it must
+# pass the 21-chunk and 65-chunk rollout gates before being trusted.
+def ffn0_fp8_enabled():
+    import os
+    return os.environ.get("LINGBOT_FFN0_FP8", "0") not in ("0", "false", "False")
+
+
+def apply_ffn0_fp8(model, log=print):
+    """Replace each block's FFN up-projection with a rowwise-FP8 compute module.
+
+    Must run AFTER the weight-only pass, which skips ffn.0 whenever
+    LINGBOT_FFN0_FP8 is set (see lingbot_fp8.lingbot_fp8_filter), so the rowwise
+    quantisation sees the original bf16 weights rather than quantised ones.
+
+    LINGBOT_FFN0_FP8_DEFER=1 makes this a no-op. Needed by A/B harnesses that
+    want to hold BOTH the bf16 and the rowwise module and swap them at runtime:
+    the flag still makes the weight-only pass skip ffn.0 (so bf16 is preserved),
+    but leaves the conversion to the harness.
+    """
+    import os
+    if os.environ.get("LINGBOT_FFN0_FP8_DEFER", "0") not in ("0", "false", "False"):
+        log("[perf_mode] P2a: deferred to the caller "
+            "(LINGBOT_FFN0_FP8_DEFER=1)")
+        return 0
+    if not ffn0_fp8_enabled():
+        return 0
+    from torchao.quantization import (
+        Float8DynamicActivationFloat8WeightConfig, quantize_)
+    n = 0
+    for blk in getattr(model, "blocks", []):
+        ffn = getattr(blk, "ffn", None)
+        up = ffn[0] if ffn is not None and len(ffn) > 0 else None
+        if up is None:
+            continue
+        quantize_(up, Float8DynamicActivationFloat8WeightConfig())
+        n += 1
+    log(f"[perf_mode] P2a: {n} FFN up-projections converted to rowwise FP8 "
+        f"(numerical path changed -> fast-mode class; needs rollout gates)")
+    return n

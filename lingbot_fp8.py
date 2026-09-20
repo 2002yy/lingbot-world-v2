@@ -48,6 +48,16 @@ import torch.nn as nn
 # 命中的 fqn 片段。注意都带前后点，避免误伤名字符合前缀的其它模块。
 _TARGETS = (".self_attn.", ".cross_attn.", ".ffn.")
 
+# P2a: when LINGBOT_FFN0_FP8=1 the FFN up-projection (`ffn.0`) is handled by a
+# rowwise FP8 *compute* pass instead, so the weight-only pass must skip it --
+# otherwise it would be quantised twice, and the second quantisation would be
+# applied to already-quantised weights. Measured at M=1881, rowwise is a large
+# win on this one GEMM (wide N=8960: 2.711 -> 1.106 ms/call) while it is a loss
+# on the down-projection (narrow N=1536: 1.690 -> 2.460), which is why only
+# ffn.0 is affected.
+import os as _os
+_FFN0_FP8 = _os.environ.get("LINGBOT_FFN0_FP8", "0") not in ("0", "false", "False")
+
 
 def lingbot_fp8_filter(module, fqn):
     """torchao quantize_ 的 filter_fn: (nn.Module, fqn) -> bool"""
@@ -55,6 +65,8 @@ def lingbot_fp8_filter(module, fqn):
         return False
     if not fqn.startswith("blocks."):
         return False
+    if _FFN0_FP8 and fqn.endswith(".ffn.0"):
+        return False          # handled by the rowwise pass instead
     return any(t in fqn for t in _TARGETS)
 
 

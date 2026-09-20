@@ -295,6 +295,13 @@ class WanI2VCausal:
             from lingbot_fp8 import apply_selective_fp8
             apply_selective_fp8(self.model)
 
+        # P2a: optional rowwise-FP8 FFN up-projection. Runs after the
+        # weight-only pass, which skips ffn.0 when this lever is enabled so the
+        # rowwise quantisation sees original bf16 weights. Changes the numerical
+        # path -> fast-mode class.
+        from wan import perf_mode as _pm
+        _pm.apply_ffn0_fp8(self.model)
+
         self.scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=self.num_train_timesteps,
             shift=1,
