@@ -344,13 +344,18 @@ class CausalWanAttentionBlock(nn.Module):
             # identical output -- so it needs no rollout gate and is enabled by
             # default. Set LINGBOT_CAM_CACHE=0 to disable.
             key = current_start
-            if key == 0:
-                # chunk 0 always starts a generation, so this is where a new
-                # generation is detected and any stale entry invalidated. Keying
-                # on current_start alone would otherwise collide across
-                # generate() calls, which restart at 0.
-                self._cam_cache = None
             cache = getattr(self, "_cam_cache", None)
+            if key == 0 and cache is not None and cache[0] != 0:
+                # A new generation: chunk 0 always starts one, so seeing
+                # current_start == 0 after a NON-zero key means we wrapped
+                # around. Note the `cache[0] != 0` test: resetting on key == 0
+                # alone also fired on forwards 1..3 of chunk 0 itself, which
+                # silently threw away the cache for the whole first chunk
+                # (measured: each cam module ran 210 times over 4 chunks where
+                # 120 was expected). This test keeps chunk 0 cached while still
+                # invalidating across generate() calls.
+                cache = None
+                self._cam_cache = None
             if _CAM_CACHE and cache is not None and cache[0] == key:
                 cam_scale, cam_shift = cache[1], cache[2]
             else:
