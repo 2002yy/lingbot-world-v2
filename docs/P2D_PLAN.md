@@ -188,3 +188,142 @@ captured `x` in the block is a view after the patchify/rope split, and 1800 came
 from the prewarm-shaped dummy pass in the very first capture. Confirm the real
 in-block token count in r2 as well, since an off-by-81 shape would mean the
 corpus was not the production shape.
+
+
+---
+
+# ENVIRONMENT BLOCKER (2026-09-21) — root cause confirmed, waiting on the host fix
+
+## Symptom
+
+Every attempt to build `WanI2VCausal` kills the WSL VM. `uptime` resets to
+"up 0 min", the log is left at 0 bytes, and even the first `print` never lands.
+Trivial python, all imports and CUDA allocations up to 2 GiB all work; only the
+model build dies. It dies mid-build, after "step2: building pipe ...".
+
+## Root cause — Windows Resource Exhaustion Detector, event 2004
+
+```
+System log, Microsoft-Windows-Resource-Exhaustion-Detector, Event ID 2004
+"Windows successfully diagnosed a low virtual memory condition", largest
+consumer listed as vmmemWSL:
+
+  21:14   vmmemWSL  8,107,376,640 B  ~  7.6 GB
+  21:16   vmmemWSL  9,220,898,816 B  ~  8.6 GB
+  21:37   vmmemWSL  8,261,619,712 B  ~  7.7 GB
+  21:41   vmmemWSL  7,324,598,272 B  ~  6.8 GB
+
+32 such events in the last 3 hours.
+```
+
+The causal chain is complete:
+
+```
+model load produces a transient commit peak in vmmemWSL (7.5-9.2 GB)
+        -> host CommitFree falls below what the peak needs
+        -> Windows Resource Exhaustion Detector fires (event 2004)
+        -> WSL is terminated
+```
+
+## Baseline captured BEFORE the fix (use this to verify the fix)
+
+```
+Physical total  15.5 GB
+Physical free    5.2 GB
+CommitLimit     31.5 GB          (= 15.5 physical + 16 pagefile)
+CommitFree       6.1 GB
+AutoManagedPF    False
+PageFile         C:\pagefile.sys   allocated 16 GB, peak 7.7 GB
+Event 2004 in last 3h: 32
+```
+
+## The fix (host-side, needs admin)
+
+**A — primary, long-term.** Raise the page file. Either turn on "Automatically
+manage paging file size for all drives", or set it manually to 32 GB:
+
+```
+RAM             ~15.5 GB
+pagefile         32 GB
+CommitLimit    ~47.5 GB     (+16 GB headroom vs today)
+```
+
+Then **reboot Windows**, even though some resizes apply dynamically: this is the
+substrate of the performance experiments and it is not worth leaving any doubt
+about whether the new page file is fully in effect.
+
+Verify after reboot (all three):
+
+```
+PageFile allocated  ~ 32 GB
+CommitLimit         ~ 47 GB
+CommitFree          clearly above the old 8 GB
+```
+
+**B — temporary only.** Closing host apps frees roughly 5-6 GB of commit:
+msedge 1.24 GB, OpenCode 0.82, node 0.70, MsMpDef 0.62, FlClash 0.53,
+steamwebhelper 0.44, QQ x2 0.65. That would put CommitFree at ~13-14 GB against a
+worst observed peak of 9.2 GB, so it is probably enough to finish the current
+experiment without rebooting — but it is not stable, because browser/Steam/AV
+commit fluctuates. Whether the model can start must not depend on how many Edge
+tabs are open today.
+
+**C — do NOT use `.wslconfig memory=10GB` for this.** It caps what WSL may use;
+it does not add Windows commit budget. Since the startup phase itself needs close
+to 9 GB, a 10 GB cap would simply move the failure from
+"Windows kills WSL" to "Linux/Python OOMs". The failure location changes, not the
+problem. Demoted from the fix list.
+
+**D — T5 CPU load peak: record only, do not act.**
+`t5_cpu=True` keeps umt5-xxl resident on the CPU, and `pipe.text_encoder = None`
+immediately after the prompt embedding, so the 8-9 GB is very likely a transient
+startup peak. But changing the load dtype now would introduce a fresh question
+("are the prompt embeddings bit-identical, does the conditioning change, does the
+rollout change") and would contaminate the current P2d bit-exact line. Filed as
+
+```
+Startup-memory optimization / T5 CPU load peak
+  -> future investigation
+  NOT part of P2d
+  NOT needed to unblock the current experiment
+```
+
+## Methodology lesson to keep
+
+> A failed measurement must not be trusted merely because its result looks
+> plausible. A diagnostic probe itself needs execution evidence.
+
+The specific trap here: the memory probe used `Start-Process ... -ArgumentList`
+with a command string whose quoting did not survive, so **the target program
+never started**. The probe then reported a beautifully clean, very plausible
+1.1 GB vmmemWSL figure -- and that figure was used to *refute* the correct
+hypothesis.
+
+Resource monitors of this kind should therefore always record:
+
+```
+target PID
+process start time
+command line
+exit code / alive state
+number of samples taken
+```
+
+If there is no evidence the target process existed, the resource data is **not
+eligible for attribution**. This is the same discipline as the `repro vs repro`
+determinism control: measure that the thing you think you are measuring is
+actually running.
+
+## Recovery point
+
+Nothing needs reverting. Last commit before the blocker is `89160de`
+(`p2d1a2_r3.py`, 15804 bytes, tracked tree clean). Once the host has commit
+headroom, run:
+
+```
+wsl -e bash -c "cd ~/ai/lingbot-world-v2 && LINGBOT_FP8=1 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  ~/ai/lingbot-env/bin/python -u p2d1a2_r3.py --scene 04 --chunks 2"
+```
+
+No performance conclusion from before the blocker is invalidated.
