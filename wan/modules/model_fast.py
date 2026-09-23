@@ -31,6 +31,48 @@ def bump_cam_epoch():
     """Invalidate all camera caches. Call at the start of prewarm/generate."""
     _CAM_EPOCH[0] += 1
     return _CAM_EPOCH[0]
+
+
+# ---------------------------------------------------------------------------
+# P2d-1b: replace `a + b*c` with torch.addcmul(a, b, c).
+#
+# addcmul is a single fused ATen op, so it removes a kernel boundary and the
+# intermediate tensor without changing the floating-point evaluation order --
+# unlike torch.compile, which does change it (measured: 0/48 bit-exact vs 48/48
+# for addcmul). Each flag is opt-in and each chain was verified bit-exact on the
+# model's ACTUAL expression before being wired up (p2d1b1_expr.py):
+#
+#   mod1  n1.float()*(1+e1) + e0   ->  addcmul(e0, n1.float(), 1+e1)
+#   mod2  n2.float()*(1+e4) + e3   ->  addcmul(e3, n2.float(), 1+e4)
+#   resA  x + y*e2                 ->  addcmul(x, y, e2)
+#   resB  x + y*e5                 ->  addcmul(x, y, e5)
+#   cam   (1+cs)*x + ct            ->  addcmul(ct, x, 1+cs)
+#
+# NOTE on a trap already hit once: an earlier probe tested n1 + (1+e1)*e0 for
+# mod1 and x + (1+cs)*ct for cam -- operands swapped relative to the real lines
+# -- and reported cam as NOT exact. Retesting the real expressions gave 0.000e+00
+# on all five. Always mirror the model's operand order, not the intended algebra.
+_FUSE_MOD = _os.environ.get("LINGBOT_FUSE_MOD", "0") not in ("0", "false", "False")
+_FUSE_RES = _os.environ.get("LINGBOT_FUSE_RES", "0") not in ("0", "false", "False")
+_FUSE_CAM = _os.environ.get("LINGBOT_FUSE_CAM", "0") not in ("0", "false", "False")
+
+
+def fuse_flags():
+    return {"mod": _FUSE_MOD, "res": _FUSE_RES, "cam": _FUSE_CAM}
+
+
+def set_fuse(mod=None, res=None, cam=None):
+    """Runtime override, so one process can A/B the arms without reimporting."""
+    global _FUSE_MOD, _FUSE_RES, _FUSE_CAM
+    if mod is not None:
+        _FUSE_MOD = mod
+    if res is not None:
+        _FUSE_RES = res
+    if cam is not None:
+        _FUSE_CAM = cam
+    return fuse_flags()
+
+
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from wan.modules.attention import attention
@@ -345,12 +387,20 @@ class CausalWanAttentionBlock(nn.Module):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
         assert e[0].dtype == torch.float32
         # self-attention
+        if _FUSE_MOD:
+            _q_in = torch.addcmul(e[0].squeeze(2), self.norm1(x).float(),
+                                  1 + e[1].squeeze(2))
+        else:
+            _q_in = self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
         y = self.self_attn(
-            self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
+            _q_in,
             seq_lens, grid_sizes, freqs, kv_cache, current_start, max_attention_size,
             frame_seqlen=frame_seqlen, seq_lens_int=seq_lens_int)
         with torch.amp.autocast('cuda', dtype=torch.float32):
-            x = x + y * e[2].squeeze(2)
+            if _FUSE_RES:
+                x = torch.addcmul(x, y, e[2].squeeze(2))
+            else:
+                x = x + y * e[2].squeeze(2)
 
         # cam injection (only if dit_cond_dict is provided and contains c2ws_plucker_emb)
         if dit_cond_dict is not None and "c2ws_plucker_emb" in dit_cond_dict:
@@ -379,7 +429,10 @@ class CausalWanAttentionBlock(nn.Module):
                 if _CAM_CACHE:
                     self._cam_cache = (key, cam_scale, cam_shift)
             # this part still runs every forward: x differs per denoise step
-            x = (1.0 + cam_scale) * x + cam_shift
+            if _FUSE_CAM:
+                x = torch.addcmul(cam_shift, x, 1.0 + cam_scale)
+            else:
+                x = (1.0 + cam_scale) * x + cam_shift
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e, crossattn_cache=None,
@@ -387,10 +440,17 @@ class CausalWanAttentionBlock(nn.Module):
             x = x + self.cross_attn(self.norm3(x), context, context_lens,
                                     crossattn_cache=crossattn_cache,
                                     cross_attn_first_call=cross_attn_first_call)
-            y = self.ffn(
-                self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
+            if _FUSE_MOD:
+                _f_in = torch.addcmul(e[3].squeeze(2), self.norm2(x).float(),
+                                      1 + e[4].squeeze(2))
+            else:
+                _f_in = self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)
+            y = self.ffn(_f_in)
             with torch.amp.autocast('cuda', dtype=torch.float32):
-                x = x + y * e[5].squeeze(2)
+                if _FUSE_RES:
+                    x = torch.addcmul(x, y, e[5].squeeze(2))
+                else:
+                    x = x + y * e[5].squeeze(2)
             return x
 
         x = cross_attn_ffn(x, context, context_lens, e, crossattn_cache,
