@@ -327,3 +327,64 @@ wsl -e bash -c "cd ~/ai/lingbot-world-v2 && LINGBOT_FP8=1 \
 ```
 
 No performance conclusion from before the blocker is invalidated.
+
+
+---
+
+# RESULT — P2d-1a2-r3 (elementwise exactness matrix, inline, run after the host fix)
+
+Host fix confirmed first: with automatic pagefile management the pagefile grew
+15.47 -> 28.58 GB on demand, CommitLimit rose 30.9 -> 44.05 GB, vmmemWSL peaked
+at 6.04 GB, and **Event 2004 fired zero times** (it had fired 32 times in three
+hours before). The VM survived the whole run. Caveat: C: has only 29.9 GB free,
+and the pagefile already grew to 28.58 GB, so a larger pagefile would need disk
+cleanup first.
+
+```
+   chain     exact   max|diff|   a/b/c dtype                ref      cand
+   mod1     40/40    0.000e+00   bfloat16/float32/float32   float32  float32
+   mod2     40/40    0.000e+00   float32/float32/float32    float32  float32
+   resA     40/40    0.000e+00   bfloat16/bfloat16/float32  float32  float32
+   resB     40/40    0.000e+00   float32/bfloat16/float32   float32  float32
+   cam       0/40    1.953e-03   float32/bfloat16/bfloat16  float32  float32
+
+verdict (torch.equal, zero tolerance):
+   chain   addcmul     compile(negative control)   chunks  fwds        blocks
+   mod1    EXACT       0/6 max 1.91e-06            [0, 1]  [0,1,2,3]   10
+   mod2    EXACT       0/6 max 2.38e-07            [0, 1]  [0,1,2,3]   10
+   resA    EXACT       0/6 max 1.53e-05            [0, 1]  [0,1,2,3]   10
+   resB    EXACT       0/6 max 6.10e-05            [0, 1]  [0,1,2,3]   10
+   cam     NOT EXACT   0/6 max 1.95e-03            [0, 1]  [0,1,2,3]   10
+```
+
+## Verdict
+
+**mod1 / mod2 / resA / resB are 40/40 bit-exact (max|diff| = 0.000e+00).** They
+are promoted to repro-safe candidates and go into the P2d-1b layered rollout.
+
+**cam is 0/40, max|diff| = 1.953e-03 = 2^-9.** Root cause: in the candidate
+`addcmul(cam_shift, x, 1+cam_scale)` the quantity `1+cam_scale` is computed in
+bf16 (cam_scale is bf16), whereas the reference `(1+cam_scale)*x + cam_shift`
+computes it in f32. bf16 eps is about 0.0078 and 2^-9 = 0.00195 matches the
+observed magnitude exactly. **cam is CLOSED**, following the P2a precedent.
+Rescuing it would require promoting `1+cam_scale` to f32, which changes the
+numerics and destroys the point of the exercise, so it is not done.
+
+Two secondary confirmations:
+
+- The coverage collapse is fixed: samples now span chunk [0,1] x forward
+  [0,1,2,3] x 10 distinct blocks, instead of piling into chunk0/fwd0.
+- The torch.compile negative control is 0/6 (max 6.10e-05) against addcmul's
+  0.000e+00, reconfirming that compiler fusion and an explicit fused ATen op are
+  not the same numerical transformation.
+
+## Next: P2d-1b layered rollout
+
+```
+P2d-1b1  modulation family (mod1 + mod2) -> local exact
+                                         -> rollout latent hash exact
+                                         -> bare whole-chunk >= 1% (15.4 ms)
+P2d-1b2  + resA / resB
+P2d-1b3  + cam  -- CLOSED, skipped
+Measure the incremental attribution at each layer.
+```
