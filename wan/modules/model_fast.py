@@ -97,6 +97,71 @@ from .sage_backend import attention as attention
 from .sage_backend import flash_attention as flash_attention
 
 
+# ---------------------------------------------------------------------------
+# RoPE setup caches (bit-exact; see docs/ROPE_ATTRIBUTION.md).
+#
+# `grid_sizes.tolist()` is a CUDA->CPU hard sync. On its own it costs ~34 us, but
+# removing it from the whole call is worth ~236 us/call (-52.7%) because it blocks
+# the CPU behind the GPU queue and serialises the async pipeline. The geometry is
+# constant for a whole rollout, so the list form is cached on tensor identity.
+#
+# The `freqs_i` table (three expand()s plus a cat, forcing a real 0.96 MB
+# allocation) is rebuilt on every one of the 240 calls per chunk although it only
+# depends on (freqs, c, start_frame, f, h, w). Within a chunk start_frame is
+# constant across the four forwards, so the cache is hit almost every time.
+# Bounded, and validated with an identity check so a recycled id() cannot serve a
+# stale table.
+_ROPE_GRID_CACHE = {}
+_ROPE_TABLE_CACHE = {}
+_ROPE_TABLE_MAX = 8
+
+# LINGBOT_ROPE_CACHE=1 enables it. Defaults to 0 until the rollout gate passes,
+# so that merely updating the tree cannot silently change generated worlds.
+_ROPE_CACHE = _os.environ.get("LINGBOT_ROPE_CACHE", "0") not in (
+    "0", "false", "False")
+
+
+def set_rope_cache(enabled):
+    """Runtime override, so one process can A/B the arms without reimporting."""
+    global _ROPE_CACHE
+    _ROPE_CACHE = bool(enabled)
+    if not _ROPE_CACHE:
+        _ROPE_GRID_CACHE.clear()
+        _ROPE_TABLE_CACHE.clear()
+    return _ROPE_CACHE
+
+
+def rope_cache_stats():
+    return {"grid_entries": len(_ROPE_GRID_CACHE),
+            "table_entries": len(_ROPE_TABLE_CACHE)}
+
+
+def _rope_grid_list(grid_sizes):
+    ent = _ROPE_GRID_CACHE.get(id(grid_sizes))
+    if ent is not None and ent[0] is grid_sizes:
+        return ent[1]
+    lst = grid_sizes.tolist()
+    _ROPE_GRID_CACHE[id(grid_sizes)] = (grid_sizes, lst)
+    return lst
+
+
+def _rope_freqs_i(freqs_split, freqs, c, start_frame, f, h, w):
+    key = (id(freqs), c, start_frame, f, h, w)
+    ent = _ROPE_TABLE_CACHE.get(key)
+    if ent is not None and ent[0] is freqs:
+        return ent[1]
+    table = torch.cat([
+        freqs_split[0][start_frame:start_frame + f].view(f, 1, 1, -1)
+        .expand(f, h, w, -1),
+        freqs_split[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+        freqs_split[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+    ], dim=-1).reshape(f * h * w, 1, -1)
+    if len(_ROPE_TABLE_CACHE) >= _ROPE_TABLE_MAX:
+        _ROPE_TABLE_CACHE.clear()
+    _ROPE_TABLE_CACHE[key] = (freqs, table)
+    return table
+
+
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     n, c = x.size(2), x.size(3) // 2
 
@@ -106,18 +171,24 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     # loop over samples
     output = []
 
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+    grid_list = _rope_grid_list(grid_sizes) if _ROPE_CACHE \
+        else grid_sizes.tolist()
+
+    for i, (f, h, w) in enumerate(grid_list):
         seq_len = f * h * w
 
         # precompute multipliers
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
             seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][start_frame:start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-            dim=-1).reshape(seq_len, 1, -1)
+        if _ROPE_CACHE:
+            freqs_i = _rope_freqs_i(freqs, freqs, c, start_frame, f, h, w)
+        else:
+            freqs_i = torch.cat([
+                freqs[0][start_frame:start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+            ],
+                dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)

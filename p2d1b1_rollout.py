@@ -51,11 +51,13 @@ from taehv import TAEHV  # noqa: E402
 PROMPT = "A first-person view of a natural landscape with smooth camera motion."
 
 ARMS = {
-    "off":         dict(mod=False, res=False, cam=False),
-    "off2":        dict(mod=False, res=False, cam=False),
-    "mod":         dict(mod=True,  res=False, cam=False),
-    "mod_res":     dict(mod=True,  res=True,  cam=False),
-    "mod_res_cam": dict(mod=True,  res=True,  cam=True),
+    "off":         dict(mod=False, res=False, cam=False, rope=False),
+    "off2":        dict(mod=False, res=False, cam=False, rope=False),
+    "rope":        dict(mod=False, res=False, cam=False, rope=True),
+    "rope_modcam": dict(mod=True,  res=True,  cam=True,  rope=True),
+    "mod":         dict(mod=True,  res=False, cam=False, rope=False),
+    "mod_res":     dict(mod=True,  res=True,  cam=False, rope=False),
+    "mod_res_cam": dict(mod=True,  res=True,  cam=True,  rope=False),
 }
 
 
@@ -104,7 +106,7 @@ def main():
     print("=" * 72)
     for a in arm_names:
         print(f"  {a:<12} mod={int(ARMS[a]['mod'])} res={int(ARMS[a]['res'])} "
-              f"cam={int(ARMS[a]['cam'])}")
+              f"cam={int(ARMS[a]['cam'])} rope={int(ARMS[a]['rope'])}")
     print(f"  chunks={args.chunks} chunk_size={CS} seed={sd} scene={scene} "
           f"reps={args.reps}")
     print("=" * 72, flush=True)
@@ -122,6 +124,7 @@ def main():
     def set_arm(name):
         spec = ARMS[name]
         mf.set_fuse(mod=spec["mod"], res=spec["res"], cam=spec["cam"])
+        mf.set_rope_cache(spec["rope"])
         for blk in pipe.model.blocks:
             blk._cam_cache = None
 
