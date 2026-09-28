@@ -291,7 +291,31 @@ class WanI2VCausal:
             shard_fn=shard_fn,
             convert_model_dtype=convert_model_dtype).to(self.device)
 
-        if os.getenv("LINGBOT_FP8", "0") == "1":
+        # Weight storage mode.
+        #
+        # P2b measured the FP8 weight-only path at +356 ms per chunk (22.8%)
+        # against original bf16 weights, for 1.30 GiB of VRAM. So FP8 is a
+        # CAPACITY lever, not a speed lever: it is slower, not faster. The name
+        # below says so explicitly rather than calling it "fp8 fast".
+        #
+        #   LINGBOT_WEIGHT_MODE=bf16          original weights, fastest, ~6.6 GiB
+        #   LINGBOT_WEIGHT_MODE=fp8_lowmem    weight-only FP8, ~5.3 GiB
+        #
+        # The default is still fp8_lowmem: the quality gate has passed
+        # (docs/P2B_QUALITY_GATE.md) but the full interactive 8 GB memory gate
+        # has not run yet, and the flip is deliberately the last step.
+        #
+        # LINGBOT_FP8 is honoured as a legacy alias so every existing script and
+        # harness keeps working.
+        _wmode = os.getenv("LINGBOT_WEIGHT_MODE")
+        if _wmode is None:
+            _wmode = "fp8_lowmem" if os.getenv("LINGBOT_FP8", "0") == "1" \
+                else "bf16"
+        if _wmode not in ("bf16", "fp8_lowmem"):
+            raise ValueError(
+                f"LINGBOT_WEIGHT_MODE must be 'bf16' or 'fp8_lowmem', got "
+                f"{_wmode!r}")
+        if _wmode == "fp8_lowmem":
             from lingbot_fp8 import apply_selective_fp8
             apply_selective_fp8(self.model)
 
