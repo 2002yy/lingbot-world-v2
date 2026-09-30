@@ -754,6 +754,51 @@ class Wan2_1_VAE:
             z_dim=z_dim,
         ).eval().requires_grad_(False).to(device=device, dtype=dtype)
 
+    def encode_streamed(self, img, F, h, w, block=4):
+        """Encode the condition clip [real frame, then zeros] without materialising it.
+
+        `encode()` is already chunked internally -- frame 0 alone, then 4 frames
+        at a time carrying feat_cache -- so the memory blow-up is not the encoder
+        but the caller building the full padded input first. This mirrors the same
+        block boundaries and therefore returns a BIT-IDENTICAL result, while peak
+        input memory becomes a single block.
+
+        `img` is [C, h, w] at the final resolution (already resized), `F` the
+        number of pixel frames. Returns [z_dim, lat_f, lat_h, lat_w] float32, the
+        same contract as `encode([u])[0]`.
+        """
+        with amp.autocast(dtype=self.dtype):
+            vm = self.model
+            vm.clear_cache()                     # own state, cannot be poisoned
+            x0 = img[None].to(self.device, dtype=self.dtype)
+            outs = []
+            vm._enc_conv_idx = [0]
+            outs.append(vm.encoder(x0[:, :, :1],
+                                   feat_cache=vm._enc_feat_map,
+                                   feat_idx=vm._enc_conv_idx))
+            s = 1
+            while s < F:
+                e = min(s + block, F)
+                n = e - s
+                vm._enc_conv_idx = [0]
+                blk = torch.zeros(x0.shape[0], x0.shape[1], n, h, w,
+                                  device=self.device, dtype=self.dtype)
+                outs.append(vm.encoder(blk,
+                                       feat_cache=vm._enc_feat_map,
+                                       feat_idx=vm._enc_conv_idx))
+                del blk
+                s = e
+            out = torch.cat(outs, 2)
+            del outs
+            mu, log_var = vm.conv1(out).chunk(2, dim=1)
+            if isinstance(self.scale[0], torch.Tensor):
+                mu = (mu - self.scale[0].view(1, vm.z_dim, 1, 1, 1)) * \
+                     self.scale[1].view(1, vm.z_dim, 1, 1, 1)
+            else:
+                mu = (mu - self.scale[0]) * self.scale[1]
+            vm.clear_cache()
+            return mu.float().squeeze(0)
+
     def encode(self, videos):
         """
         videos: A list of videos each with shape [C, T, H, W].

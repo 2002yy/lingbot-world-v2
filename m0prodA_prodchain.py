@@ -154,6 +154,23 @@ def main():
         print("  phase timing ON (each boundary synchronised; total is inflated)",
               flush=True)
 
+    # hash the condition latent y, so gate 1 can require y itself to be
+    # bit-identical between the whole-clip and streamed encoders
+    YH = {}
+    _orig_cl = pipe._condition_latent
+
+    def _hashed_cl(img, F, h, w):
+        y = _orig_cl(img, F, h, w)
+        if "y" not in YH:
+            YH["y"] = hashlib.sha256(
+                y.detach().float().cpu().numpy().tobytes()).hexdigest()[:16]
+            YH["shape"] = list(y.shape)
+        return y
+
+    pipe._condition_latent = _hashed_cl
+    print(f"  stream_encode={os.environ.get('LINGBOT_STREAM_ENCODE', '0')}",
+          flush=True)
+
     rows = []
     for r in range(args.requests):
         before = snap()
@@ -292,8 +309,11 @@ def main():
     with open(f"{args.out_dir}/m0_prod_a.json", "w") as f:
         json.dump(dict(weight=args.weight, pixel=[pw, ph], frames=args.frames,
                        chunk_size=args.chunk_size, requests=args.requests,
-                       offload=args.offload, after_load=after_load, rows=rows),
-                  f, indent=2)
+                       offload=args.offload, after_load=after_load, rows=rows,
+                       y_hash=YH.get("y"), y_shape=YH.get("shape"),
+                       stream_encode=os.environ.get(
+                           "LINGBOT_STREAM_ENCODE", "0")), f, indent=2)
+    print(f"  condition y hash {YH.get('y')}  shape {YH.get('shape')}")
     print(f"\n[m0-prod-A] wrote {args.out_dir}/m0_prod_a.json")
 
 

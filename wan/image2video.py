@@ -647,6 +647,28 @@ class WanI2VCausal:
             max_attention_size=max_attention_size)
 
 
+
+    def _condition_latent(self, img, F, h, w):
+        """Build the condition latent y for a clip of [real frame, then zeros].
+
+        LINGBOT_STREAM_ENCODE=1 routes this through the streamed encoder, which
+        is bit-identical (M1-0) and avoids materialising the whole padded input.
+        Default 0 until the M1-2 gates pass, so merely updating the tree cannot
+        change generated worlds.
+        """
+        if os.getenv("LINGBOT_STREAM_ENCODE", "0") == "1":
+            img_rs = torch.nn.functional.interpolate(
+                img[None].cpu(), size=(h, w), mode='bicubic').transpose(0, 1)
+            return self.vae.encode_streamed(img_rs, F, h, w)
+        return self.vae.encode([
+            torch.concat([
+                torch.nn.functional.interpolate(
+                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
+                        0, 1),
+                torch.zeros(3, F - 1, h, w)
+            ], dim=1).to(self.device)
+        ])[0]
+
     def _restore_device(self, offload_model):
         """Return the DiT to the execution device if a previous request offloaded it.
 
@@ -866,15 +888,7 @@ class WanI2VCausal:
             wasd_action_tensor = rearrange(wasd_action_tensor, 'b (f h w) c -> b c f h w', f=lat_f, h=lat_h, w=lat_w).to(self.param_dtype)
             c2ws_plucker_emb = torch.cat([c2ws_plucker_emb, wasd_action_tensor], dim=1)
 
-        y = self.vae.encode([
-            torch.concat([
-                torch.nn.functional.interpolate(
-                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
-                        0, 1),
-                torch.zeros(3, F - 1, h, w)
-            ],
-                         dim=1).to(self.device)
-        ])[0]
+        y = self._condition_latent(img, F, h, w)
         y = torch.concat([msk, y])
 
         @contextmanager
@@ -1119,15 +1133,7 @@ class WanI2VCausal:
                 f=lat_f, h=lat_h, w=lat_w,
             ).to(self.param_dtype)
 
-        y = self.vae.encode([
-            torch.concat(
-                [
-                    torch.nn.functional.interpolate(img[None].cpu(), size=(h, w), mode='bicubic').transpose(0, 1),
-                    torch.zeros(3, F - 1, h, w)
-                ], 
-                dim=1,
-            ).to(self.device)
-        ])[0]
+        y = self._condition_latent(img, F, h, w)
         y = torch.concat([msk, y])
 
         @contextmanager
