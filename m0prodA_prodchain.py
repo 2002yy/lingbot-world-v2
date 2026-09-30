@@ -311,8 +311,12 @@ def main():
                        chunk_size=args.chunk_size, requests=args.requests,
                        offload=args.offload, after_load=after_load, rows=rows,
                        y_hash=YH.get("y"), y_shape=YH.get("shape"),
-                       stream_encode=os.environ.get(
-                           "LINGBOT_STREAM_ENCODE", "0")), f, indent=2)
+                       # report the EFFECTIVE mode, not the raw env value: the
+                       # code default is now "1", so an unset variable means
+                       # streamed, and recording "0" would misdescribe the run
+                       stream_encode=("1" if os.environ.get(
+                           "LINGBOT_STREAM_ENCODE", "1") == "1" else "0")),
+                  f, indent=2)
     print(f"  condition y hash {YH.get('y')}  shape {YH.get('shape')}")
     print(f"\n[m0-prod-A] wrote {args.out_dir}/m0_prod_a.json")
 
