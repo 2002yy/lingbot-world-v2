@@ -430,6 +430,14 @@ class WanI2VCausal:
         from wan.modules.model_fast import bump_cam_epoch
         bump_cam_epoch()
 
+        # A previous request may have offloaded the DiT to the CPU; bring it back
+        # before any forward. See _restore_device. Measured cost is reported so
+        # the restore cannot silently become a hot-path tax.
+        _restore_s = self._restore_device(offload_model)
+        if _restore_s > 0.001:
+            logging.info(f'[restore] DiT back to {self.device} in '
+                         f'{_restore_s*1000:.1f} ms')
+
         cfg = self.config
 
         # Match generate()'s shape derivation exactly.
@@ -638,6 +646,28 @@ class WanI2VCausal:
             max_sequence_length=max_sequence_length,
             max_attention_size=max_attention_size)
 
+
+    def _restore_device(self, offload_model):
+        """Return the DiT to the execution device if a previous request offloaded it.
+
+        offload_model=True calls self.model.cpu() at the end of a generation but
+        the next request never moves it back, so the second request fails with a
+        CUDA/CPU dtype mismatch. Restoring here keeps the cost at once per
+        request rather than once per chunk, and is a no-op when the model is
+        already resident.
+        """
+        if not offload_model:
+            return 0.0
+        import time as _t
+        t0 = _t.perf_counter()
+        try:
+            p = next(self.model.parameters())
+            if p.device != self.device:
+                self.model.to(self.device)
+        except StopIteration:
+            pass
+        return _t.perf_counter() - t0
+
     def _generate_causal_fast(self,
                               input_prompt,
                               img,
@@ -698,6 +728,14 @@ class WanI2VCausal:
         # prewarm's) entry would be reused. See wan/modules/model_fast.py.
         from wan.modules.model_fast import bump_cam_epoch
         bump_cam_epoch()
+
+        # A previous request may have offloaded the DiT to the CPU; bring it back
+        # before any forward. See _restore_device. Measured cost is reported so
+        # the restore cannot silently become a hot-path tax.
+        _restore_s = self._restore_device(offload_model)
+        if _restore_s > 0.001:
+            logging.info(f'[restore] DiT back to {self.device} in '
+                         f'{_restore_s*1000:.1f} ms')
 
         c2ws = np.load(os.path.join(action_path, "poses.npy")) # opencv coordinate
         len_c2ws = ((len(c2ws) - 1) // 4) * 4 + 1

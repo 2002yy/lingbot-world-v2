@@ -30,6 +30,7 @@ internally, so this measures BOTH settings and reports which one is required.
 """
 import argparse
 import gc
+import hashlib
 import json
 import os
 import statistics
@@ -78,6 +79,10 @@ def main():
                          "and weight type (CPU) should be the same'")
     ap.add_argument("--local_window", type=int, default=8)
     ap.add_argument("--sink", type=int, default=2)
+    ap.add_argument("--phase_timing", type=int, default=0,
+                    help="attribute the request across DiT / condition encode / "
+                         "VAE decode. Each boundary is synchronised, so this "
+                         "inflates the total; the tax is reported separately")
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
@@ -121,9 +126,39 @@ def main():
     im = Image.open(f"{args.base}/image.jpg").convert("RGB")
     im_rs = im.resize((pw, ph), Image.BICUBIC)
 
+    # ---- optional phase attribution -------------------------------------
+    # Only the DiT weight path is affected by bf16 vs fp8, so a full-request
+    # number alone cannot say whether the weight mode matters. Each phase is
+    # timed at its boundary with a synchronise, which serialises and therefore
+    # inflates the total; the un-instrumented total is measured in the other
+    # configuration and the tax is reported.
+    PH = {"dit": 0.0, "enc": 0.0, "dec": 0.0, "n_dit": 0, "n_enc": 0, "n_dec": 0}
+
+    def wrap(obj, name, key, nkey):
+        orig = getattr(obj, name)
+
+        def timed(*a, **kw):
+            torch.cuda.synchronize()
+            t = time.perf_counter()
+            r = orig(*a, **kw)
+            torch.cuda.synchronize()
+            PH[key] += time.perf_counter() - t
+            PH[nkey] += 1
+            return r
+        setattr(obj, name, timed)
+
+    if args.phase_timing:
+        wrap(pipe.model, "forward", "dit", "n_dit")
+        wrap(pipe.vae, "encode", "enc", "n_enc")
+        wrap(pipe.vae, "decode", "dec", "n_dec")
+        print("  phase timing ON (each boundary synchronised; total is inflated)",
+              flush=True)
+
     rows = []
     for r in range(args.requests):
         before = snap()
+        for k in ("dit", "enc", "dec", "n_dit", "n_enc", "n_dec"):
+            PH[k] = 0.0 if k.startswith(("dit", "enc", "dec")) else 0
         torch.cuda.reset_peak_memory_stats()
         gc.collect()
         if args.ensure_device:
@@ -146,8 +181,17 @@ def main():
                 offload_model=bool(args.offload),
             )
             torch.cuda.synchronize()
+            # hash the output so the offload-restore fix can be shown to produce
+            # the same result as the manual-restore path
+            if torch.is_tensor(out):
+                out_hash = hashlib.sha256(
+                    out.detach().float().cpu().numpy().tobytes()
+                ).hexdigest()[:16]
+            else:
+                out_hash = "non-tensor"
         except Exception as e:
             ok, err = False, f"{type(e).__name__}: {e}"
+            out_hash = None
             try:
                 torch.cuda.synchronize()
             except Exception:
@@ -156,13 +200,17 @@ def main():
         during = snap()
         after = snap()
         rows.append(dict(req=r, ok=ok, err=err, s=dt, before=before,
-                         during=during, after=after))
+                         during=during, after=after, out_hash=out_hash,
+                         phase=dict(PH)))
         lab = "cold" if r == 0 else "warm"
+        ph = (f"  | dit {PH['dit']:.2f}s/{PH['n_dit']} enc {PH['enc']:.2f}s "
+              f"dec {PH['dec']:.2f}s") if args.phase_timing else ""
         print(f"  [{r} {lab}] ok={ok} {dt:6.2f} s  "
               f"global max_reserved {during['max_reserved']:7.0f}  "
               f"max_alloc {during['max_alloc']:7.0f}  "
               f"| after: alloc {after['alloc']:7.0f} reserved "
               f"{after['reserved']:7.0f} free {after['free']:7.0f}"
+              f"  out={out_hash}{ph}"
               + (f"  err={err}" if err else ""), flush=True)
         if not ok:
             break
@@ -220,6 +268,22 @@ def main():
               f"{min(r['during']['free'] for r in good):.0f})")
         overall = c1 and c2 and c3 and c4
         print()
+        if args.phase_timing:
+            warm = good[1:] or good
+            d_ = statistics.mean(r["phase"]["dit"] for r in warm)
+            e_ = statistics.mean(r["phase"]["enc"] for r in warm)
+            c_ = statistics.mean(r["phase"]["dec"] for r in warm)
+            tot = statistics.mean(r["s"] for r in warm)
+            print(f"  PHASE BREAKDOWN (warm, instrumented so inflated):")
+            print(f"    DiT forward   {d_:7.2f} s  ({d_/tot*100:5.1f}%)  "
+                  f"n={warm[0]['phase']['n_dit']}")
+            print(f"    VAE encode    {e_:7.2f} s  ({e_/tot*100:5.1f}%)  "
+                  f"n={warm[0]['phase']['n_enc']}")
+            print(f"    VAE decode    {c_:7.2f} s  ({c_/tot*100:5.1f}%)  "
+                  f"n={warm[0]['phase']['n_dec']}")
+            print(f"    unaccounted   {tot-d_-e_-c_:7.2f} s  "
+                  f"({(tot-d_-e_-c_)/tot*100:5.1f}%)")
+            print()
         print(f"  OVERALL: {'PASS' if overall else 'FAIL'}")
         print(f"  geometry authority: 304x528 is "
               f"{'a viable' if overall else 'NOT yet a viable'} 8 GB deployment "
