@@ -430,13 +430,12 @@ class WanI2VCausal:
         from wan.modules.model_fast import bump_cam_epoch
         bump_cam_epoch()
 
-        # A previous request may have offloaded the DiT to the CPU; bring it back
-        # before any forward. See _restore_device. Measured cost is reported so
-        # the restore cannot silently become a hot-path tax.
-        _restore_s = self._restore_device(offload_model)
-        if _restore_s > 0.001:
-            logging.info(f'[restore] DiT back to {self.device} in '
-                         f'{_restore_s*1000:.1f} ms')
+        # NOTE: no _restore_device() here. prewarm() has no offload_model
+        # argument and is the first call after construction, when the model is
+        # necessarily already resident. An earlier version of the offload fix
+        # wired the restore into this site too and raised NameError on every
+        # prewarm() -- caught immediately by the next test, which is the point
+        # of running one after every change.
 
         cfg = self.config
 
@@ -651,12 +650,19 @@ class WanI2VCausal:
     def _condition_latent(self, img, F, h, w):
         """Build the condition latent y for a clip of [real frame, then zeros].
 
-        LINGBOT_STREAM_ENCODE=1 routes this through the streamed encoder, which
-        is bit-identical (M1-0) and avoids materialising the whole padded input.
-        Default 0 until the M1-2 gates pass, so merely updating the tree cannot
-        change generated worlds.
+        The streamed encoder is the default. It is bit-identical to the
+        whole-clip path (M1-0: condition y hash and final output hash match
+        exactly, at 81 and 249 frames), it removes a length-dependent OOM cliff
+        (at 501 and 777 frames the whole-clip path cannot complete even the first
+        request while the streamed path can), and G4-hotpath showed it does not
+        contaminate the following hot path: DiT, decode and combined latency all
+        land within +-0.3% under ABBA interleaving, with no allocator creep and no
+        event/state change.
+
+        LINGBOT_STREAM_ENCODE=0 restores the whole-clip path, kept for debugging
+        and for reproducing pre-M1-2 numbers.
         """
-        if os.getenv("LINGBOT_STREAM_ENCODE", "0") == "1":
+        if os.getenv("LINGBOT_STREAM_ENCODE", "1") == "1":
             img_rs = torch.nn.functional.interpolate(
                 img[None].cpu(), size=(h, w), mode='bicubic').transpose(0, 1)
             return self.vae.encode_streamed(img_rs, F, h, w)
