@@ -210,7 +210,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 <!-- The `--infer_mode` flag selects the inference mode:
 
 | infer_mode | Model | Sampling |
-| :---  | :--- | :--- |
+| :--- | :--- | :--- |
 | `causal_fast` (default) | Distilled few-step model (`LingBot-World-Fast`) | 4 steps per chunk, no CFG |
 | `causal_pretrain` | Pretrained causal model | 40 steps per chunk with CFG | -->
 
