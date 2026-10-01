@@ -192,17 +192,12 @@ def main():
         now_s = time.perf_counter() - loop_t0
         pump_input(now_s)
 
-        # advance the 60 Hz integrator to now, then snapshot it into the runtime
-        steps = max(1, int(round((now_s - getattr(pump_input, "_last", 0.0))
-                                 * CTRL_HZ)))
-        for _ in range(steps):
-            ctl.step(dt=1.0 / (CTRL_HZ * 1.25))
-        pump_input._last = now_s
+        # t1: the runtime binds this chunk's events and MATERIALISES the
+        # immutable candidate camera exactly once. The generation below reads the
+        # candidate; it never re-runs the reduction, so a retry cannot double-apply.
         snap = rt.begin_chunk()
-        snap["camera"].pose = ctl.pose.copy()
-        snap["camera"].v = ctl.v.copy()
+        chunk_pose = snap["candidate_camera"].pose
 
-        chunk_pose = snap["camera"].pose
         rel0 = (np.eye(4) if prev_pose is None
                 else np.linalg.inv(prev_pose) @ chunk_pose)
         plk = plucker(rel0)

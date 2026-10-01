@@ -42,6 +42,8 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
+from control_reduce import reduce_controls
+
 # ---------------------------------------------------------------- status enum
 PENDING = "pending"                      # accepted, not yet assigned
 IN_FLIGHT = "in_flight"                  # assigned to a chunk being generated
@@ -252,6 +254,13 @@ class InteractiveRuntime:
 
     # ------------------------------------------------------------- lifecycle
     def begin_chunk(self, _now_ns: Optional[int] = None) -> dict:
+        """t1. Bind the queued events to the next chunk and MATERIALISE the
+        immutable in-flight candidate camera.
+
+        The reduction runs exactly once, here. A retry reads the stored candidate
+        and never re-runs it, so retry double-apply is impossible by construction
+        rather than prevented by a bookkeeping flag.
+        """
         if self._inflight is not None:
             raise RuntimeStateError("begin_chunk while a chunk is in flight")
         if self._pending_reset:
@@ -272,18 +281,42 @@ class InteractiveRuntime:
             r.assigned_chunk = chunk_index
             r.generation_id = self.committed.generation_id
             r.terminal_status = IN_FLIGHT
+
+        base_camera = self.committed.camera.copy()
+        # ---- the single materialisation of this chunk's camera authority ----
+        candidate_camera = reduce_controls(base_camera, assigned)
+
         snapshot = dict(
             chunk_index=chunk_index,
             generation_id=self.committed.generation_id,
             applied_event_ids=tuple(ev.event_id for ev in assigned),
-            camera=self.committed.camera.copy(),
-            events=assigned)
+            base_camera=base_camera,
+            candidate_camera=candidate_camera,
+            events=assigned,
+            attempts=0)
         self._inflight = snapshot
         return snapshot
 
+    def fail_chunk(self, reason: str = "") -> dict:
+        """A RETRYABLE failure. The flight, its candidate and the lineage all
+        survive, and the trace stays in_flight.
+
+        Deliberately NOT terminal: an attempt that failed must not consume the
+        event, and must not be confused with abandoning the batch.
+        """
+        if self._inflight is None:
+            raise RuntimeStateError("fail_chunk without an in-flight chunk")
+        self._inflight["attempts"] += 1
+        for eid in self._inflight["applied_event_ids"]:
+            r = self._records[eid]
+            r.terminal_status = IN_FLIGHT
+            r.note = (reason or "attempt failed") + \
+                     f" (attempt {self._inflight['attempts']}, retryable)"
+        return self._inflight
+
     def abort_chunk(self, reason: str = "") -> list[LatencyTraceRecord]:
-        """Abandon the in-flight chunk. Every assigned event gets an ABORTED
-        terminal record, so failed samples stay in the distribution."""
+        """Abandon the batch for good. THIS is the only path to the terminal
+        `aborted` status, and it is not retryable."""
         if self._inflight is None:
             raise RuntimeStateError("abort_chunk without an in-flight chunk")
         out = []
@@ -319,10 +352,12 @@ class InteractiveRuntime:
                 f"submitted {snap['generation_id']}")
 
         t2 = _now_ns if _now_ns is not None else time.perf_counter_ns()
+        # ---- ATOMIC ADOPTION. The candidate is adopted verbatim; camera state is
+        # ---- never recomputed here, so commit cannot become a second apply seam.
         self.committed = CommittedState(
             chunk_index=snap["chunk_index"],
             generation_id=snap["generation_id"],
-            camera=snap["camera"],
+            camera=snap["candidate_camera"],
             applied_event_ids=snap["applied_event_ids"])
         for eid in snap["applied_event_ids"]:
             r = self._records[eid]
