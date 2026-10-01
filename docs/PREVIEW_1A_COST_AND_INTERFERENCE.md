@@ -99,3 +99,51 @@ treating the preview as a product path it should be characterised across a small
 of real controls, checking SSIM, edgeSSIM, camera-motion consistency and a gross
 structural failure rate -- not to build a new benchmark, but to confirm the single
 sample was not a fluke.
+
+---
+
+# Quality across real controls: the single sample was the pessimistic end
+
+The earlier 0.687 / 0.635 figure came from one chunk. Characterised across nine
+real controls (W, W+D, yaw, A, pitch, W+yaw-, S, D+yaw+, and the warm chunk):
+
+    chunk  ssim vs final   edgeSSIM   mean|d|      std
+        1         0.6871     0.6352    0.0603   0.3257
+        2         0.7068     0.6663    0.0559   0.3538
+        3         0.7545     0.7172    0.0462   0.3584
+        4         0.8268     0.8003    0.0386   0.3738
+        5         0.8653     0.8405    0.0323   0.3741
+        6         0.8403     0.8142    0.0363   0.3860
+        7         0.8314     0.8005    0.0362   0.3769
+        8         0.8718     0.8464    0.0303   0.3905
+        9         0.8058     0.7753    0.0391   0.3893
+
+    ssim       p50 0.8268   min 0.6871   max 0.8718   spread 0.1847
+    edgeSSIM   p50 0.8003   min 0.6352   max 0.8464
+    gross structural failures (ssim < 0.30): 0/9
+
+Two things this changes.
+
+First, **the single sample was the worst case, not a representative one.** The
+median across controls is 0.8268 / 0.8003, and there are no gross structural
+failures. So the preview is consistently directionally correct rather than
+occasionally usable.
+
+Second, the figure **improves with chunk index** (0.69 at chunk 1 rising to 0.87 by
+chunk 8). The most likely reason is that later chunks carry more KV context, so
+step0 starts from a better-conditioned state. That is worth noting because it means
+the preview's quality is lowest exactly at the start of a session, which is also
+when a user is most likely to be forming their first impression of the interaction.
+
+This is not a new benchmark and it is not used as a gate; it answers one question --
+was the sample a fluke -- and the answer is no, in the favourable direction.
+
+## Combined picture after Preview-1A
+
+    ~241 ms   non-authoritative preview, ssim p50 0.83 vs the authoritative frame
+    ~807 ms   authoritative world frame
+    cost      about +5.7% on the authoritative latency, which could not be hidden
+
+Arm C (separate stream) is closed. The remaining ways to recover the 43 ms would be
+a cheaper preview decoder, latent reuse, or an independent preview head -- not more
+stream engineering, since the side stream demonstrably does not overlap on this GPU.

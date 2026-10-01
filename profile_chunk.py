@@ -185,8 +185,11 @@ def main():
                     cur = pipe.scheduler.add_noise(
                         x0, torch.randn(x0.shape, generator=g, device=dev,
                                         dtype=x0.dtype), timesteps[ti + 1])
-            if args.save_steps and cid == 1:
-                saved[f"step{ti}"] = x0.detach().float().cpu().clone()
+            if args.save_steps and cid >= 1 and ti == 0:
+                # keep the step0 latent for EVERY chunk, so the preview quality
+                # figure is characterised across controls rather than resting on
+                # one sample
+                saved[f"c{cid}_step0"] = x0.detach().float().cpu().clone()
             tr.dit_step_ms.append(stop() if stop else float("nan"))
 
         stop = cuda_phase(dev) if args.profile else None
@@ -195,6 +198,8 @@ def main():
                        cross_attn_first_call=False, **kw)
         tr.kv_update_ms = stop() if stop else float("nan")
         torch.cuda.synchronize()
+        if args.save_steps and cid >= 1:
+            saved[f"c{cid}_final"] = x0.detach().float().cpu().clone()
 
         meta = rt.new_frame_meta("real", snap["chunk_index"],
                                  snap["generation_id"],
