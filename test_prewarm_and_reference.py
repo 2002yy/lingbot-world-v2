@@ -53,8 +53,8 @@ def do_chunk(rt, ctrl):
     snap = rt.begin_chunk()
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     return rt.committed_projection()
 
 
@@ -85,8 +85,8 @@ def run_sequence(script, prewarm=False, retry_at=None, future_at=None):
             snap = rt._inflight
         m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                               snap["applied_event_ids"])
-        rt.mark_real_decoded(m)
         rt.commit(m)
+        rt.mark_real_decoded(m)
         steps.append(rt.committed_projection())
     return rt, steps
 
@@ -289,8 +289,8 @@ def r10c_future_event_is_consumed_at_its_frontier():
     future = rt.accept({"right": 1.0})            # claims chunk 1
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     snap2 = rt.begin_chunk()                      # frontier is now chunk 1
     assert snap2["applied_event_ids"] == (future.event_id,), \
         "the future event was not consumed at its own frontier"

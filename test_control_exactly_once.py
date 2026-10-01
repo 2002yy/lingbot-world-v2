@@ -73,8 +73,8 @@ def gate1_single_event_exactly_once():
 
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     assert same(cam(rt), ref), "committed != C0 + W"
 
 
@@ -119,8 +119,8 @@ def gate3_retry_does_not_reapply():
     m = rt.new_frame_meta("real", rt._inflight["chunk_index"],
                           rt._inflight["generation_id"],
                           rt._inflight["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     assert same(cam(rt), c1), "committed camera != the candidate"
 
     # and explicitly: NOT a double application
@@ -143,8 +143,8 @@ def gate3b_retryable_failure_is_not_terminal():
     snap = rt._inflight
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     assert rt.record(ev.event_id).terminal_status == COMMITTED
 
 
@@ -177,8 +177,8 @@ def gate4_new_input_cannot_enter_a_retrying_chunk():
 
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     # e2 belongs to the NEXT chunk
     snap2 = rt.begin_chunk()
     assert snap2["applied_event_ids"] == (e2.event_id,)
@@ -226,13 +226,16 @@ def gate7_frame_and_camera_lineage_share_a_source():
     snap = rt.begin_chunk()
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     assert e.event_id in m.applied_event_ids
     assert rt.committed.applied_event_ids == snap["applied_event_ids"]
     assert rt.record(e.event_id).first_real_frame_id == m.frame_id
-    # a frame that does not carry the event must not set t3
-    other = rt.new_frame_meta("real", 123, 99, ())
+    # a frame that does not carry the event must not set t3. It still has to be a
+    # committed-generation real frame, since the runtime now enforces that a real
+    # frame is never marked before its chunk commits.
+    other = rt.new_frame_meta("real", rt.committed.chunk_index,
+                              rt.committed.generation_id, ())
     rt.mark_real_decoded(other)
     assert rt.record(e.event_id).first_real_frame_id == m.frame_id
 
@@ -256,8 +259,8 @@ def gate8_reference_sequence_matches_state_by_state():
         snap = rt.begin_chunk()
         m = rt.new_frame_meta("real", snap["chunk_index"],
                               snap["generation_id"], snap["applied_event_ids"])
-        rt.mark_real_decoded(m)
         rt.commit(m)
+        rt.mark_real_decoded(m)
         got.append(rt.committed.camera.copy())
 
     for i, (a, b) in enumerate(zip(ref, got)):
@@ -271,8 +274,8 @@ def gate8_reference_sequence_matches_state_by_state():
         s = rt2.begin_chunk()
         m = rt2.new_frame_meta("real", s["chunk_index"], s["generation_id"],
                                s["applied_event_ids"])
-        rt2.mark_real_decoded(m)
         rt2.commit(m)
+        rt2.mark_real_decoded(m)
     ref2 = reduce_sequence(base, [{"right": 1.0}, {"right": -1.0}])
     assert same(rt2.committed.camera, ref2[-1])
     assert not same(ref2[0], ref2[1]), "the two steps must differ, or the test " \

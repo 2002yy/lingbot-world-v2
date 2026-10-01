@@ -55,8 +55,8 @@ def commit_next(rt):
     snap = rt.begin_chunk()
     m = rt.new_frame_meta("real", snap["chunk_index"], snap["generation_id"],
                           snap["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     return snap, m
 
 
@@ -216,8 +216,8 @@ def gate7_retry_does_not_advance_the_frontier():
     # and it is still assignable once the retried chunk finally commits
     m = rt.new_frame_meta("real", snap10["chunk_index"], snap10["generation_id"],
                           snap10["applied_event_ids"])
-    rt.mark_real_decoded(m)
     rt.commit(m)
+    rt.mark_real_decoded(m)
     assert rt.frontier() == (0, snap10["chunk_index"] + 1)
     snap = rt.begin_chunk()
     assert snap["applied_event_ids"] == (e.event_id,), \

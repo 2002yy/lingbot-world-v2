@@ -38,8 +38,8 @@ def run_chunk(rt, t1, t2, t3, gen=None):
     m = rt.new_frame_meta("real", snap["chunk_index"],
                           snap["generation_id"] if gen is None
                           else gen, snap["applied_event_ids"])
-    rt.mark_real_decoded(m, _now_ns=t3)
     rt.commit(m, _now_ns=t2)
+    rt.mark_real_decoded(m, _now_ns=t3)
     return snap, m
 
 

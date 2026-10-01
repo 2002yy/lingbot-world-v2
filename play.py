@@ -262,18 +262,26 @@ def main():
                        cross_attn_first_call=False, **kw)
         torch.cuda.synchronize()
 
-        # decode -> the real frame. t3 is set AFTER decode, for this frame only.
+        # ---- t2 BEFORE decode ----
+        # The generation state becomes authoritative the moment the last
+        # state-mutating step (the KV update) completes; the decode is a read-only
+        # projection of it. Committing here is what makes "a real frame is never
+        # marked before its chunk commits" true, and it keeps a refused commit
+        # from leaving t3 already set.
+        meta = rt.new_frame_meta("real", snap["chunk_index"],
+                                 snap["generation_id"],
+                                 snap["applied_event_ids"])
+        rt.commit(meta)                      # fail-closed
+
+        # decode -> the real frame; t3 is set AFTER decode, for this frame only
+        torch.cuda.synchronize(); t_c0 = time.perf_counter()
         with torch.no_grad():
             tae.decode_video(x0.to(dev).permute(1, 0, 2, 3).unsqueeze(0),
                              parallel=False, show_progress_bar=False)
         torch.cuda.synchronize()
-        gen_ms = (time.perf_counter() - t_gen) * 1000
-
-        meta = rt.new_frame_meta("real", snap["chunk_index"],
-                                 snap["generation_id"],
-                                 snap["applied_event_ids"])
+        dec_ms = (time.perf_counter() - t_c0) * 1000
         rt.mark_real_decoded(meta)
-        rt.commit(meta)                      # fail-closed
+        gen_ms = (time.perf_counter() - t_gen) * 1000
         rows.append(dict(chunk=cid, gen_ms=gen_ms,
                          applied=list(snap["applied_event_ids"])))
         prev_pose = chunk_pose

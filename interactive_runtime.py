@@ -482,6 +482,14 @@ class InteractiveRuntime:
 
     def mark_real_decoded(self, meta: FrameMeta,
                           _now_ns: Optional[int] = None) -> None:
+        """t3. Only a real frame may set t3, only for the events it carries, and
+        only AFTER the chunk that produced it has been successfully committed.
+
+        The ordering is enforced here rather than left to the caller. Without it a
+        refused commit could leave t3 already set, so a rejected frame would claim
+        to be the first real frame -- and the measured input->first-real latency
+        would describe a frame whose generation was never accepted.
+        """
         if meta.frame_kind != "real":
             raise RuntimeStateError(f"t3 requires a real frame, got "
                                     f"{meta.frame_kind!r}")
@@ -489,6 +497,15 @@ class InteractiveRuntime:
             raise RuntimeStateError(
                 f"refusing t3 for a {meta.provenance!r} frame: prewarm and "
                 f"warmup frames are a different provenance domain")
+        if meta.generation_id != self.committed.generation_id:
+            raise RuntimeStateError(
+                f"refusing t3: frame generation {meta.generation_id} != "
+                f"committed generation {self.committed.generation_id}")
+        if meta.chunk_index > self.committed.chunk_index:
+            raise RuntimeStateError(
+                f"refusing t3: chunk {meta.chunk_index} is not committed yet "
+                f"(committed is {self.committed.chunk_index}). A real frame must "
+                f"not be marked before its chunk commits.")
         t3 = _now_ns if _now_ns is not None else time.perf_counter_ns()
         for eid in meta.applied_event_ids:
             r = self._records.get(eid)
