@@ -79,6 +79,35 @@ class FrameMeta:
     provenance: str = "authoritative"     # authoritative | prewarm | warmup
 
 
+@dataclass(frozen=True)
+class ApplicationClaim:
+    """An immutable claim on exactly one authoritative application frontier.
+
+    Staleness is a property of the CLAIM, never of the event's age. Nothing here
+    may be derived from event_id ordering, queue residency time or wall-clock age:
+    an old event whose frontier has not yet arrived is perfectly valid, and a
+    brand-new event whose frontier has already passed is stale.
+    """
+    generation_id: int
+    target_chunk_index: int
+
+    def key(self) -> tuple:
+        return (self.generation_id, self.target_chunk_index)
+
+
+@dataclass
+class QueuedInput:
+    """A queued event together with its claim.
+
+    Deliberately separate from LatencyTraceRecord: the claim is runtime
+    correctness authority, not metrics authority, and the Latency-1B schema was
+    just frozen. If stale forensics ever needs expected/observed frontier, that is
+    a separate schema migration rather than a field smuggled in now.
+    """
+    event: InputEvent
+    claim: ApplicationClaim
+
+
 @dataclass
 class CameraState:
     pose: Any = None
@@ -190,7 +219,7 @@ class InteractiveRuntime:
     """Minimal authoritative runtime. Unchanged contract, formal records."""
 
     def __init__(self, camera: Optional[CameraState] = None):
-        self._queue: deque[InputEvent] = deque()
+        self._queue: deque[QueuedInput] = deque()
         self._next_event_id = 1
         self._next_frame_id = 1
         # keyed by event_id => canonicality is structural, not procedural
@@ -198,8 +227,25 @@ class InteractiveRuntime:
         self.committed = CommittedState(
             camera=(camera.copy() if camera is not None else CameraState()))
         self._inflight: Optional[dict] = None
-        self._pending_reset = False
         self._rejected: list[tuple[InputEvent, str]] = []
+
+    # ------------------------------------------------------------- frontier
+    def _next_free_chunk(self) -> int:
+        """The frontier a newly accepted event legitimately targets.
+
+        If a chunk is in flight, that chunk is already claimed, so a new event
+        targets the one after it. This is what stops a retry from swallowing input
+        that arrived during the retry window -- and it does so by construction,
+        not by a check somewhere in the generation loop.
+        """
+        base = self.committed.chunk_index + 1
+        if self._inflight is not None:
+            base += 1
+        return base
+
+    def frontier(self) -> tuple:
+        """The application frontier the NEXT begin_chunk() will realise."""
+        return (self.committed.generation_id, self.committed.chunk_index + 1)
 
     # ---------------------------------------------------------------- input
     def accept(self, controls: Optional[dict] = None, kind: str = "control",
@@ -214,22 +260,29 @@ class InteractiveRuntime:
         self._records[ev.event_id] = LatencyTraceRecord(
             trace_id=f"ev{ev.event_id}", event_id=ev.event_id, event_kind=kind,
             t0_accept_ns=ev.t0_ns, terminal_status=PENDING)
-        self._queue.append(ev)
+
         if kind == "reset":
-            # Invalidate only what was accepted BEFORE the reset, at the moment
-            # the reset is accepted. An earlier version cleared the whole queue in
-            # begin_chunk(), which also discarded events accepted AFTER the reset
-            # -- they had a legitimate claim on the new generation and were
-            # wrongly marked reset_invalidated.
+            # A reset is applied AT ACCEPT TIME, not deferred to begin_chunk.
+            # Deferring it would let events accepted after the reset carry claims
+            # in the old generation and be wrongly invalidated.
+            if self._inflight is not None:
+                raise RuntimeStateError(
+                    "reset while a chunk is in flight: fail or abort it first, "
+                    "otherwise the in-flight claim would be silently orphaned")
             for q in self._queue:
-                if q.event_id == ev.event_id:
-                    continue
-                r = self._records[q.event_id]
+                r = self._records[q.event.event_id]
                 r.terminal_status = RESET_INVALIDATED
                 r.note = "invalidated by reset"
             self._queue.clear()
-            self._queue.append(ev)
-            self._pending_reset = True
+            self.committed = CommittedState(
+                chunk_index=-1, generation_id=self.committed.generation_id + 1,
+                camera=self.committed.camera.copy(), applied_event_ids=())
+            return ev
+
+        # ---- the immutable claim, bound exactly once, here ----
+        claim = ApplicationClaim(generation_id=self.committed.generation_id,
+                                 target_chunk_index=self._next_free_chunk())
+        self._queue.append(QueuedInput(event=ev, claim=claim))
         return ev
 
     def reject(self, ev: InputEvent, reason: str = "rejected",
@@ -238,11 +291,13 @@ class InteractiveRuntime:
         if reason not in (REJECTED, STALE):
             raise RuntimeStateError(f"reject reason must be {REJECTED!r} or "
                                     f"{STALE!r}, got {reason!r}")
-        try:
-            self._queue.remove(ev)
-        except ValueError:
-            pass
+        self._queue = deque(q for q in self._queue
+                            if q.event.event_id != ev.event_id)
         rec = self._records[ev.event_id]
+        if rec.is_terminal():
+            raise RuntimeStateError(
+                f"event {ev.event_id} is already terminal "
+                f"({rec.terminal_status}); terminal is terminal")
         rec.terminal_status = reason
         rec.note = f"refused before assignment at generation " \
                    f"{self.committed.generation_id}"
@@ -250,33 +305,61 @@ class InteractiveRuntime:
         return rec
 
     def pending(self) -> list[InputEvent]:
+        return [q.event for q in self._queue]
+
+    def queued(self) -> list[QueuedInput]:
+        """Queue with claims, for correctness assertions. Tests should inspect
+        claims and runtime state directly rather than parsing `note`, which is
+        human diagnostics and must not become a second authority."""
         return list(self._queue)
+
+    def claim_of(self, event_id: int) -> Optional[ApplicationClaim]:
+        for q in self._queue:
+            if q.event.event_id == event_id:
+                return q.claim
+        return None
 
     # ------------------------------------------------------------- lifecycle
     def begin_chunk(self, _now_ns: Optional[int] = None) -> dict:
-        """t1. Bind the queued events to the next chunk and MATERIALISE the
-        immutable in-flight candidate camera.
+        """t1. Bind the events whose claim matches this frontier, and MATERIALISE
+        the immutable in-flight candidate camera.
 
-        The reduction runs exactly once, here. A retry reads the stored candidate
-        and never re-runs it, so retry double-apply is impossible by construction
-        rather than prevented by a bookkeeping flag.
+        The claim partition runs BEFORE the camera reduction, so a stale event can
+        never contribute to a candidate even transiently.
         """
         if self._inflight is not None:
             raise RuntimeStateError("begin_chunk while a chunk is in flight")
-        if self._pending_reset:
-            # Events queued after the reset are legitimate and stay; anything
-            # accepted before it was already invalidated at accept() time.
-            self.committed = CommittedState(
-                chunk_index=-1, generation_id=self.committed.generation_id + 1,
-                camera=self.committed.camera.copy(), applied_event_ids=())
-            self._pending_reset = False
 
         chunk_index = self.committed.chunk_index + 1
-        assigned = list(self._queue)
-        self._queue.clear()
+        current = (self.committed.generation_id, chunk_index)
+
+        assigned, still_pending, stale = [], [], []
+        for q in self._queue:
+            c = q.claim.key()
+            if c == current:
+                assigned.append(q)
+            elif c > current:
+                still_pending.append(q)      # future frontier: not due yet
+            else:
+                stale.append(q)              # claim already expired
+
+        # ---- fail closed on stale, BEFORE any camera work ----
+        for q in stale:
+            r = self._records[q.event.event_id]
+            if r.is_terminal():
+                # terminal is terminal: a canonical record is never reclassified
+                raise RuntimeStateError(
+                    f"event {q.event.event_id} is already terminal "
+                    f"({r.terminal_status}); a terminal record must not be "
+                    f"re-entered into the frontier")
+            r.terminal_status = STALE
+            r.note = "application frontier passed"
+            self._rejected.append((q.event, STALE))
+        self._queue = deque(still_pending)
+
         t1 = _now_ns if _now_ns is not None else time.perf_counter_ns()
-        for ev in assigned:
-            r = self._records[ev.event_id]
+        for q in assigned:
+            r = self._records[q.event.event_id]
             r.t1_assign_ns = t1
             r.assigned_chunk = chunk_index
             r.generation_id = self.committed.generation_id
@@ -284,15 +367,16 @@ class InteractiveRuntime:
 
         base_camera = self.committed.camera.copy()
         # ---- the single materialisation of this chunk's camera authority ----
-        candidate_camera = reduce_controls(base_camera, assigned)
+        candidate_camera = reduce_controls(base_camera,
+                                           [q.event for q in assigned])
 
         snapshot = dict(
             chunk_index=chunk_index,
             generation_id=self.committed.generation_id,
-            applied_event_ids=tuple(ev.event_id for ev in assigned),
+            applied_event_ids=tuple(q.event.event_id for q in assigned),
             base_camera=base_camera,
             candidate_camera=candidate_camera,
-            events=assigned,
+            events=[q.event for q in assigned],
             attempts=0)
         self._inflight = snapshot
         return snapshot

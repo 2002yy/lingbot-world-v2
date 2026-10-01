@@ -73,6 +73,12 @@ def main():
     ap.add_argument("--n_chunks", type=int, default=10)
     ap.add_argument("--local_window", type=int, default=6)
     ap.add_argument("--sink", type=int, default=1)
+    ap.add_argument("--inject_stale", type=int, default=0,
+                    help="fault injection: after this many chunks, accept an "
+                         "event and then force the application frontier past its "
+                         "claim, so stale detection is exercised on the real GPU "
+                         "path. The event must end up terminal stale and must not "
+                         "appear in any frame's lineage.")
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
@@ -188,9 +194,18 @@ def main():
 
     rows = []
     prev_pose = None
+    stale_ev = None
     for cid in range(args.n_chunks):
         now_s = time.perf_counter() - loop_t0
         pump_input(now_s)
+
+        # fault injection for stale detection: accept an event, then shove the
+        # frontier past its claim so the next begin_chunk() must fail it closed
+        if args.inject_stale and cid == args.inject_stale:
+            stale_ev = rt.accept({"forward": 1.0})
+            print(f"  [inject] event {stale_ev.event_id} accepted, claim="
+                  f"{rt.claim_of(stale_ev.event_id)}", flush=True)
+            rt.committed.chunk_index += 2      # synthetic frontier regression
 
         # t1: the runtime binds this chunk's events and MATERIALISES the
         # immutable candidate camera exactly once. The generation below reads the
@@ -287,6 +302,22 @@ def main():
           f"{statistics.median(r['gen_ms'] for r in rows):.0f} ms")
     print(f"  committed chunk_index: {rt.committed.chunk_index}  "
           f"generation_id: {rt.committed.generation_id}")
+
+    # ---- stale sanity, if injected ----
+    stale_ok = None
+    if stale_ev is not None:
+        rec = rt.record(stale_ev.event_id)
+        in_any_frame = any(stale_ev.event_id in r["applied"] for r in rows)
+        stale_ok = (rec.terminal_status == "stale" and not in_any_frame
+                    and rec.t1_assign_ns is None)
+        print()
+        print(f"  STALE INJECTION: event {stale_ev.event_id} "
+              f"status={rec.terminal_status} assigned={rec.assigned_chunk} "
+              f"t1={rec.t1_assign_ns} in_any_frame_lineage={in_any_frame}")
+        print(f"    -> stale detection on the real GPU path: "
+              f"{'PASS' if stale_ok else 'FAIL'}")
+        print(f"    -> and the next real frame's lineage is unaffected: "
+              f"{'PASS' if not in_any_frame else 'FAIL'}")
 
     with open(f"{args.out_dir}/play_traces.json", "w") as f:
         json.dump(dict(weight=args.weight, pixel=[W, H], n_chunks=args.n_chunks,
