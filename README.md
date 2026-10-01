@@ -35,6 +35,71 @@ The real-time version of LingBot-World-Infinity is available on two platforms. W
 
 > **Note:** Reactor and LingGuang provide a convenient way to try LingBot-World-Infinity in real time. In our official setup, the model runs at full capability. To experience our official demo, join us at [WAIC 2026](https://waica2026.worldaic.com.cn/).
 
+-----
+
+## 🖥️ RTX 5060 Laptop 8GB deployment (community work)
+
+> **This section is not part of the official release above.** It documents a
+> reproducible single-session deployment of **LingBot-World-V2-1.3B-Causal-Fast** on one
+> 8 GB consumer laptop GPU, built on top of this repository. The upstream sections
+> describe the full-capability configuration; this one describes what fits in 8 GB.
+
+```bash
+./setup.sh                          # dependency and asset check
+./run.sh play --preset performance  # 304x528, bf16, preview on
+./run.sh play --preset lowmem       # weight-only FP8, lower memory, slower
+./run.sh smoke                      # release smoke test, GPU path included
+```
+
+**Interactive timeline on the frozen stack**
+
+```
+~231 ms   preview visible          zero training, zero new weights
+~790 ms   authoritative frame
+~840 ms   full authoritative display   (50 ms handoff blend, display semantics)
+```
+
+**Presets**
+
+| preset | weights | peak reserved | min free | role |
+|---|---|---:|---:|---|
+| `performance` | bf16 | ~7104 MiB | ~821 MiB | lowest latency |
+| `lowmem` | weight-only FP8 | ~5846 MiB | ~1161 MiB | longer requests, tighter memory |
+
+Low memory is **not** a speed mode here: on this GPU the FP8 weight-only path is
+*slower*, trading capacity for speed.
+
+**What this adds on top of the upstream model**
+
+- an interactive runtime with event identity, application claims, fail-closed commit,
+  committed/in-flight separation and prewarm isolation;
+- a non-authoritative preview path (variant D: skip the last spatial upsample of the
+  TAEHV decoder, then upscale) at ~231 ms, with no training and no new weights;
+- `LatencyTrace` and `PreviewTrace` as separate records.
+
+**Known limits, stated rather than implied**
+
+```
+preview ~231 ms      model-side decoded timing, NOT a physical present
+authoritative ready  ~790 ms
+full authority UI    ~840 ms as display semantics
+t4 renderer submit   UNAVAILABLE -- no renderer exists in this tree
+t5 presented         UNAVAILABLE -- no present signal exists
+input-to-display     therefore NOT MEASURABLE here
+```
+
+**Deployment geometry note.** The model's nominal geometry is 512x768; the 8 GB
+deployment geometry is **304x528**, which is what fits and what every measurement in
+this work refers to. Model nominal geometry is not deployment geometry authority.
+
+Full documentation: [`README_RELEASE.md`](README_RELEASE.md),
+[`docs/BENCHMARK_CARD.md`](docs/BENCHMARK_CARD.md),
+[`docs/RELEASE_1_AUTHORITY.md`](docs/RELEASE_1_AUTHORITY.md) and
+[`docs/RC_FROZEN.md`](docs/RC_FROZEN.md), which records every rejected path and the
+measurement behind its rejection so the decisions do not get relitigated.
+
+-----
+
 ## 🎬 Demo Gallery
 
 ### LingBot-World-V2-14B-Causal-Pretrain
