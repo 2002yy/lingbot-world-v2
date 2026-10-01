@@ -37,66 +37,90 @@ The real-time version of LingBot-World-Infinity is available on two platforms. W
 
 -----
 
-## 🖥️ RTX 5060 Laptop 8GB deployment (community work)
+## 🖥️ Community: Interactive LingBot-World 2.0 on RTX 5060 Laptop 8GB
 
-> **This section is not part of the official release above.** It documents a
-> reproducible single-session deployment of **LingBot-World-V2-1.3B-Causal-Fast** on one
-> 8 GB consumer laptop GPU, built on top of this repository. The upstream sections
-> describe the full-capability configuration; this one describes what fits in 8 GB.
+> **Community runtime and deployment work — not part of the official Robbyant release.**
+
+Run the **LingBot-World-V2-1.3B-Causal-Fast** world model interactively on a **single RTX 5060 Laptop GPU with 8 GB VRAM**, with live WASD camera control, a low-latency causal preview, and a correctness-preserving authoritative world state.
+
+**RTX 5060 Laptop 8GB · 304×528 · ~231 ms causal preview · ~820 ms first authoritative real frame · zero additional training**
+
+### What this adds
+
+- **Live WASD interaction** instead of a predefined camera trajectory.
+- **~231 ms causal visual feedback** through a zero-training preview path.
+- **Preview and authority are separate:** speculative frames cannot commit world state or claim authoritative latency.
+- A **50 ms preview → authoritative handoff** whose 60 Hz-equivalent evaluation reduced the peak correction step to about **0.25×** hard replacement.
+- **Single-GPU 8 GB deployment**, validated on an RTX 5060 Laptop GPU.
+- Frozen `performance` (BF16) and `lowmem` (weight-only FP8) deployment presets.
+- Release tooling, runtime tracing, fail-closed state commits, exactly-once control application, stale-event handling, and prewarm isolation.
+
+### Quick start
 
 ```bash
-./setup.sh                          # dependency and asset check
-./run.sh play --preset performance  # 304x528, bf16, preview on
-./run.sh play --preset lowmem       # weight-only FP8, lower memory, slower
-./run.sh smoke                      # release smoke test, GPU path included
+./setup.sh
+./run.sh play
+./run.sh smoke
 ```
 
-**Interactive timeline on the frozen stack**
+Windows:
 
-```
-~231 ms   preview visible          zero training, zero new weights
-~790 ms   authoritative frame
-~840 ms   full authoritative display   (50 ms handoff blend, display semantics)
+```powershell
+.\setup.ps1
+.\run.ps1 play
 ```
 
-**Presets**
+### Measured interaction timeline
+
+| Stage | RTX 5060 Laptop 8GB |
+|---|---:|
+| Input → runtime assignment | ~1 ms class |
+| Causal preview decoded | **~231 ms** |
+| Preview decoder alone | **27.2 ms p50** |
+| Input → first authoritative real frame | **~820 ms p50** |
+| Preview → authoritative handoff policy | **50 ms** |
+| Renderer submit (`t4`) | **Unavailable** |
+| Physical present (`t5`) | **Unavailable** |
+| Input → physical display | **Not claimed / not measurable in this tree** |
+
+`~231 ms` is **model-side decoded preview timing**, not physical display latency. The `~820 ms` figure is the measured input-to-first-authoritative-real-frame path in the release run. Because this tree has no renderer-submit or physical-present signal, it intentionally does **not** substitute a proxy timestamp and call it input-to-display latency.
+
+### Presets
 
 | preset | weights | peak reserved | min free | role |
 |---|---|---:|---:|---|
-| `performance` | bf16 | ~7104 MiB | ~821 MiB | lowest latency |
-| `lowmem` | weight-only FP8 | ~5846 MiB | ~1161 MiB | longer requests, tighter memory |
+| `performance` | BF16 | ~7104 MiB | ~821 MiB | lowest validated latency |
+| `lowmem` | weight-only FP8 | ~5846 MiB | ~1161 MiB | lower VRAM, slower |
 
-Low memory is **not** a speed mode here: on this GPU the FP8 weight-only path is
-*slower*, trading capacity for speed.
+Low memory is **not** a speed mode on this GPU: the FP8 weight-only path trades capacity for speed.
 
-**What this adds on top of the upstream model**
+### Why the preview is not allowed to become authority
 
-- an interactive runtime with event identity, application claims, fail-closed commit,
-  committed/in-flight separation and prewarm isolation;
-- a non-authoritative preview path (variant D: skip the last spatial upsample of the
-  TAEHV decoder, then upscale) at ~231 ms, with no training and no new weights;
-- `LatencyTrace` and `PreviewTrace` as separate records.
+LingBot-World is autoregressive. A small numerical change written into persistent state can compound into a different long-horizon world trajectory. This runtime therefore keeps two concepts separate:
 
-**Known limits, stated rather than implied**
+- **Preview:** early decoded feedback; never commits persistent world state.
+- **Authoritative frame:** produced by the frozen full path and allowed to advance persistent state only after a fail-closed commit.
 
-```
-preview ~231 ms      model-side decoded timing, NOT a physical present
-authoritative ready  ~790 ms
-full authority UI    ~840 ms as display semantics
-t4 renderer submit   UNAVAILABLE -- no renderer exists in this tree
-t5 presented         UNAVAILABLE -- no present signal exists
-input-to-display     therefore NOT MEASURABLE here
-```
+Reduced fixed-step authoritative paths were tested and rejected because state divergence increased across subsequent chunks. Short-run backend similarity was also insufficient: long-horizon tests showed that approximate attention/backend changes can drift into a different world trajectory even when single-call similarity is very high.
 
-**Deployment geometry note.** The model's nominal geometry is 512x768; the 8 GB
-deployment geometry is **304x528**, which is what fits and what every measurement in
-this work refers to. Model nominal geometry is not deployment geometry authority.
+### Frozen release boundary
 
-Full documentation: [`README_RELEASE.md`](README_RELEASE.md),
-[`docs/BENCHMARK_CARD.md`](docs/BENCHMARK_CARD.md),
-[`docs/RELEASE_1_AUTHORITY.md`](docs/RELEASE_1_AUTHORITY.md) and
-[`docs/RC_FROZEN.md`](docs/RC_FROZEN.md), which records every rejected path and the
-measurement behind its rejection so the decisions do not get relitigated.
+The release candidate preserves rejected experiments as part of the engineering record instead of silently reopening them:
+
+- fixed 2-step / 1-step authoritative generation — cumulative state/KV divergence;
+- learned preview head — capacity and cross-scene generalization failure;
+- same-GPU asynchronous preview — no useful overlap;
+- latent-downsample preview — severe quality loss;
+- approximate attention/backend changes as the authoritative default — long-horizon trajectory divergence;
+- exact-path KV shortcutting — the clean state-write is effectively another full model forward, not a memcpy problem.
+
+**Deployment geometry note.** The upstream nominal geometry and this 8 GB deployment geometry are different authorities. All measurements in this community work refer to **304×528** unless explicitly stated otherwise.
+
+Full documentation:
+[`README_RELEASE.md`](README_RELEASE.md) ·
+[`docs/BENCHMARK_CARD.md`](docs/BENCHMARK_CARD.md) ·
+[`docs/RELEASE_1_AUTHORITY.md`](docs/RELEASE_1_AUTHORITY.md) ·
+[`docs/RC_FROZEN.md`](docs/RC_FROZEN.md)
 
 -----
 
@@ -186,7 +210,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 <!-- The `--infer_mode` flag selects the inference mode:
 
 | infer_mode | Model | Sampling |
-| :--- | :--- | :--- |
+| :---  | :--- | :--- |
 | `causal_fast` (default) | Distilled few-step model (`LingBot-World-Fast`) | 4 steps per chunk, no CFG |
 | `causal_pretrain` | Pretrained causal model | 40 steps per chunk with CFG | -->
 
@@ -202,7 +226,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 
 - `causal_pretrain` — 480P, multi-GPU:
   ``` sh
-  torchrun --nproc_per_node=8 generate.py --task i2v-A14B --infer_mode causal_pretrain --size 480*832 --ckpt_dir lingbot-world-v2-14b-causal-pretrain --image examples/03/image.jpg --action_path examples/03 --dit_fsdp --t5_fsdp --ulysses_size 8 --frame_num 81 --prompt "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds — gentle ripples reflect the tree and sky, creating a tranquil, meditative atmosphere."
+  torchrun --nproc_per_node=8 generate.py --task i2v-A14B --infer_mode causal_pretrain --size 480*832 --ckpt_dir lingbot-world-v2-14b-causal-pretrain --image examples/03/image.jpg --action_path examples/03 --dit_fsdp --t5_fsdp --ulysses_size 8 --frame_num 81 --local_attn_size 18 --sink_size 6 --prompt "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds — gentle ripples reflect the tree and sky, creating a tranquil, meditative atmosphere."
   ```
 
 You can also use the provided `run_fast.sh` script. The task and GPU count are inferred from the checkpoint directory name (`*1.3b*` / `*1p3b*` → 1.3B on 4 GPUs, otherwise 14B on 8 GPUs):
