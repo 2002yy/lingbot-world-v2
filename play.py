@@ -260,17 +260,20 @@ def main():
           f"{'->real':>10} {'input->real':>12} {'chunk':>6} {'frame':>6}")
     print("  " + "-" * 84)
     lat = []
-    for tr in rt.traces():
-        d = tr.derived()
-        t0s = (tr.t0_input - loop_t0) / 1e9
+    for rec in rt.records():
+        d = rec.derived()
+        t0s = (rec.t0_accept_ns - loop_t0) / 1e9
         def ms(x):
-            return "-" if x is None else f"{x/1e6:.1f}"
-        print(f"  {tr.event_id:>4} {t0s:>8.3f} {ms(d['input_to_assign']):>10} "
-              f"{ms(d['input_to_commit']):>10} {ms(d['input_to_real']):>10} "
-              f"{ms(d['input_to_real']):>12} {str(tr.assigned_chunk):>6} "
-              f"{str(tr.first_real_frame_id):>6}")
-        if d["input_to_real"] is not None:
-            lat.append(d["input_to_real"] / 1e6)
+            return "-" if x is None else f"{x:.1f}"
+        print(f"  {rec.event_id:>4} {t0s:>8.3f} "
+              f"{ms(d['accept_to_assign_ms']):>10} "
+              f"{ms(d['accept_to_commit_ms']):>10} "
+              f"{ms(d['accept_to_first_real_ms']):>10} "
+              f"{ms(d['accept_to_first_real_ms']):>12} "
+              f"{str(rec.assigned_chunk):>6} "
+              f"{str(rec.first_real_frame_id):>6}  {rec.terminal_status}")
+        if d["accept_to_first_real_ms"] is not None:
+            lat.append(d["accept_to_first_real_ms"])
     print()
     if lat:
         lat_s = sorted(lat)
@@ -293,15 +296,9 @@ def main():
     with open(f"{args.out_dir}/play_traces.json", "w") as f:
         json.dump(dict(weight=args.weight, pixel=[W, H], n_chunks=args.n_chunks,
                        rows=rows,
-                       traces=[dict(event_id=t.event_id, **t.derived(),
-                                    t0=t.t0_input, t1=t.t1_assigned,
-                                    t2=t.t2_committed, t3=t.t3_real_decoded,
-                                    assigned_chunk=t.assigned_chunk,
-                                    generation_id=t.generation_id,
-                                    first_real_frame_id=t.first_real_frame_id)
-                               for t in rt.traces()],
+                       traces=rt.export(),
                        committed_chunk=rt.committed.chunk_index,
-                       input_to_real_p50_ms=(statistics.median(lat)
+                       accept_to_first_real_p50_ms=(statistics.median(lat)
                                              if lat else None),
                        t4_available=False, t5_available=False), f, indent=2)
     print(f"\n[play] wrote {args.out_dir}/play_traces.json")
