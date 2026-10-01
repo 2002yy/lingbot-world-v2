@@ -182,8 +182,8 @@ pip install flash-attn --no-build-isolation
 ### Model Download
 
 | Model | Model Type | Model Size | Download Links |
-| :--- | :--- | :--- | :--- |
-| **lingbot-world-v2-14b-causal-fast** | causal-fast | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-fast) 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/LingBot-World-V2-14B-Causal-Fast) |
+| :---  | :--- | :--- | :--- |
+| **lingbot-world-v2-14b-causal-fast** | causal-fast | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-fast) 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-world-v2-14b-causal-fast) |
 | **lingbot-world-v2-14b-causal-pretrain** | causal-pretrain | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-pretrain) |
 | **lingbot-world-v2-14b-bid** | bidirectional | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-bid) |
 | **lingbot-world-v2-1.3b-causal-fast** | causal-fast | 1.3B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-1.3b-causal-fast) |
@@ -210,7 +210,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 <!-- The `--infer_mode` flag selects the inference mode:
 
 | infer_mode | Model | Sampling |
-| :--- | :--- | :--- |
+| :---  | :--- | :--- |
 | `causal_fast` (default) | Distilled few-step model (`LingBot-World-Fast`) | 4 steps per chunk, no CFG |
 | `causal_pretrain` | Pretrained causal model | 40 steps per chunk with CFG | -->
 
