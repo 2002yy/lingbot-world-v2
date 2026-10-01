@@ -182,8 +182,8 @@ pip install flash-attn --no-build-isolation
 ### Model Download
 
 | Model | Model Type | Model Size | Download Links |
-| :---  | :--- | :--- | :--- |
-| **lingbot-world-v2-14b-causal-fast** | causal-fast | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-fast) 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-world-v2-14b-causal-fast) |
+| :--- | :--- | :--- | :--- |
+| **lingbot-world-v2-14b-causal-fast** | causal-fast | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-fast) 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/LingBot-World-V2-14B-Causal-Fast) |
 | **lingbot-world-v2-14b-causal-pretrain** | causal-pretrain | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-causal-pretrain) |
 | **lingbot-world-v2-14b-bid** | bidirectional | 14B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-14b-bid) |
 | **lingbot-world-v2-1.3b-causal-fast** | causal-fast | 1.3B | 🤗 [HuggingFace](https://huggingface.co/robbyant/lingbot-world-v2-1.3b-causal-fast) |
@@ -210,7 +210,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 <!-- The `--infer_mode` flag selects the inference mode:
 
 | infer_mode | Model | Sampling |
-| :---  | :--- | :--- |
+| :--- | :--- | :--- |
 | `causal_fast` (default) | Distilled few-step model (`LingBot-World-Fast`) | 4 steps per chunk, no CFG |
 | `causal_pretrain` | Pretrained causal model | 40 steps per chunk with CFG | -->
 
@@ -226,7 +226,7 @@ We provide `generate.py` for causal inference with KV caching, which processes v
 
 - `causal_pretrain` — 480P, multi-GPU:
   ``` sh
-  torchrun --nproc_per_node=8 generate.py --task i2v-A14B --infer_mode causal_pretrain --size 480*832 --ckpt_dir lingbot-world-v2-14b-causal-pretrain --image examples/03/image.jpg --action_path examples/03 --dit_fsdp --t5_fsdp --ulysses_size 8 --frame_num 81 --local_attn_size 18 --sink_size 6 --prompt "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds — gentle ripples reflect the tree and sky, creating a tranquil, meditative atmosphere."
+  torchrun --nproc_per_node=8 generate.py --task i2v-A14B --infer_mode causal_pretrain --size 480*832 --ckpt_dir lingbot-world-v2-14b-causal-pretrain --image examples/03/image.jpg --action_path examples/03 --dit_fsdp --t5_fsdp --ulysses_size 8 --frame_num 81 --prompt "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds — gentle ripples reflect the tree and sky, creating a tranquil, meditative atmosphere."
   ```
 
 You can also use the provided `run_fast.sh` script. The task and GPU count are inferred from the checkpoint directory name (`*1.3b*` / `*1p3b*` → 1.3B on 4 GPUs, otherwise 14B on 8 GPUs):
