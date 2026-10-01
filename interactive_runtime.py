@@ -38,7 +38,10 @@ than by discipline.
 from __future__ import annotations
 
 import time
+
+import numpy as np
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
@@ -207,6 +210,21 @@ class LatencyTraceRecord:
                 f"accept_to_present={ms(g['accept_to_present_ms'])}")
 
 
+@dataclass(frozen=True)
+class ReferenceStep:
+    """One authoritative chunk's full projection.
+
+    Reference reproducibility compares these step by step rather than comparing
+    final poses: a right-then-left pair returns to where it started, so a
+    final-state-only comparison would pass a broken sequence.
+    """
+    chunk_index: int
+    generation_id: int
+    applied_event_ids: tuple
+    camera_pose: tuple
+    camera_v: tuple
+
+
 @dataclass
 class CommittedState:
     chunk_index: int = -1
@@ -222,6 +240,7 @@ class InteractiveRuntime:
         self._queue: deque[QueuedInput] = deque()
         self._next_event_id = 1
         self._next_frame_id = 1
+        self._next_prewarm_frame_id = 1
         # keyed by event_id => canonicality is structural, not procedural
         self._records: dict[int, LatencyTraceRecord] = {}
         self.committed = CommittedState(
@@ -488,6 +507,78 @@ class InteractiveRuntime:
 
     def records(self) -> list[LatencyTraceRecord]:
         return [self._records[k] for k in sorted(self._records)]
+
+    # ---------------------------------------------------- prewarm provenance
+    def prewarm_frame_meta(self, frame_kind: str = "real") -> FrameMeta:
+        """A frame from a DIFFERENT provenance domain.
+
+        It consumes a prewarm-local id, never the authoritative frame id space, so
+        a prewarm pass cannot shift the numbering that lineage and reproducibility
+        depend on.
+        """
+        m = FrameMeta(frame_id=self._next_prewarm_frame_id, frame_kind=frame_kind,
+                      chunk_index=-1, generation_id=-1, applied_event_ids=(),
+                      provenance="prewarm")
+        self._next_prewarm_frame_id += 1
+        return m
+
+    def authoritative_fingerprint(self) -> dict:
+        """Everything a prewarm pass is forbidden to touch.
+
+        Includes the ID counters, because a prewarm that leaves the camera alone
+        but advances `_next_frame_id` would still poison lineage.
+        """
+        c = self.committed
+        def cam_bytes(cs):
+            p = np.asarray(cs.pose) if cs.pose is not None else np.array([])
+            v = np.asarray(cs.v) if cs.v is not None else np.array([])
+            return (p.tobytes() if p.size else b"", v.tobytes() if v.size else b"")
+        pose, vel = cam_bytes(c.camera)
+        return dict(
+            chunk_index=c.chunk_index,
+            generation_id=c.generation_id,
+            camera_pose=pose,
+            camera_v=vel,
+            camera_gate=c.camera.gate,
+            applied_event_ids=tuple(c.applied_event_ids),
+            queue=[(q.event.event_id, q.claim.key()) for q in self._queue],
+            records=[(r.event_id, r.terminal_status, r.t1_assign_ns,
+                      r.t2_commit_ns, r.t3_first_real_ns, r.assigned_chunk,
+                      r.first_real_frame_id) for r in self.records()],
+            next_event_id=self._next_event_id,
+            next_frame_id=self._next_frame_id,
+        )
+
+    @contextmanager
+    def prewarm_scope(self):
+        """Run prewarm work in a separate provenance domain, and VERIFY it.
+
+        On exit, normal or exceptional, the authoritative fingerprint must be
+        unchanged. A partial prewarm that raised is therefore also proven to have
+        polluted nothing -- which is the case most likely to be missed, because the
+        happy path is what usually gets tested.
+        """
+        before = self.authoritative_fingerprint()
+        try:
+            yield self
+        finally:
+            after = self.authoritative_fingerprint()
+            if before != after:
+                diff = [k for k in before if before[k] != after[k]]
+                raise RuntimeStateError(
+                    f"prewarm polluted authoritative state: {diff}")
+
+    def committed_projection(self) -> ReferenceStep:
+        """The full projection of the current authoritative chunk."""
+        c = self.committed
+        pose = (tuple(np.asarray(c.camera.pose).ravel())
+                if c.camera.pose is not None else ())
+        vel = (tuple(np.asarray(c.camera.v).ravel())
+               if c.camera.v is not None else ())
+        return ReferenceStep(chunk_index=c.chunk_index,
+                             generation_id=c.generation_id,
+                             applied_event_ids=tuple(c.applied_event_ids),
+                             camera_pose=pose, camera_v=vel)
 
     def export(self) -> list[dict]:
         """Raw-only export. Derived values are recomputed on load."""

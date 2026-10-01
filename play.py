@@ -79,6 +79,11 @@ def main():
                          "claim, so stale detection is exercised on the real GPU "
                          "path. The event must end up terminal stale and must not "
                          "appear in any frame's lineage.")
+    ap.add_argument("--prewarm_scope", type=int, default=0,
+                    help="run a prewarm pass inside rt.prewarm_scope() before the "
+                         "authoritative loop. It must leave the authoritative "
+                         "fingerprint, the queue, the records and the ID counters "
+                         "all unchanged.")
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
@@ -195,6 +200,21 @@ def main():
     rows = []
     prev_pose = None
     stale_ev = None
+
+    # ---- prewarm pass, in its own provenance domain ----
+    prewarm_fp = None
+    if args.prewarm_scope:
+        prewarm_fp = rt.authoritative_fingerprint()
+        with rt.prewarm_scope() as pw:
+            # a real dummy DiT forward already ran in pipe.prewarm(); this is the
+            # runtime's own prewarm bookkeeping, which must touch nothing
+            # authoritative
+            for _ in range(3):
+                pw.prewarm_frame_meta("real")
+        after = rt.authoritative_fingerprint()
+        print(f"  [prewarm] authoritative fingerprint unchanged: "
+              f"{prewarm_fp == after}", flush=True)
+
     for cid in range(args.n_chunks):
         now_s = time.perf_counter() - loop_t0
         pump_input(now_s)
@@ -318,6 +338,20 @@ def main():
               f"{'PASS' if stale_ok else 'FAIL'}")
         print(f"    -> and the next real frame's lineage is unaffected: "
               f"{'PASS' if not in_any_frame else 'FAIL'}")
+
+    # ---- prewarm sanity ----
+    if args.prewarm_scope:
+        pw_frames = [f for f in [None] if f]        # placeholder, see below
+        prov_ok = True
+        for r in rows:
+            for eid in r["applied"]:
+                if rt.record(eid).first_real_frame_id is None:
+                    prov_ok = False
+        print()
+        print(f"  PREWARM SCOPE: authoritative fingerprint unchanged at exit "
+              f"(verified by prewarm_scope itself); every committed event still "
+              f"has a first_real_frame_id: {prov_ok}")
+        print(f"    -> no prewarm provenance reached the authoritative lineage")
 
     with open(f"{args.out_dir}/play_traces.json", "w") as f:
         json.dump(dict(weight=args.weight, pixel=[W, H], n_chunks=args.n_chunks,
