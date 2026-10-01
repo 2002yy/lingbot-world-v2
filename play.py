@@ -45,6 +45,7 @@ from wan.utils.cam_utils import get_Ks_transformed, get_plucker_embeddings
 from cam_controller import CameraController
 
 from interactive_runtime import CameraState, InteractiveRuntime, RuntimeStateError
+from preview_trace import PreviewTrace
 
 sys.path.insert(0, os.path.expanduser("~/ai/taehv"))
 from taehv import TAEHV  # noqa: E402
@@ -84,6 +85,14 @@ def main():
                          "authoritative loop. It must leave the authoritative "
                          "fingerprint, the queue, the records and the ID counters "
                          "all unchanged.")
+    ap.add_argument("--preview", default="variant_d",
+                    choices=["variant_d", "off"],
+                    help="production preview path. variant_d is the frozen "
+                         "candidate: no training, no new weights, cross-scene "
+                         "PASS, and a 50 ms blend at the handoff.")
+    ap.add_argument("--blend_ms", type=int, default=50,
+                    help="handoff blend duration. 50 ms is what Preview-2B "
+                         "accepted; 0 is a hard replace.")
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
@@ -125,6 +134,40 @@ def main():
         assets_dir=args.assets_dir)
     dev, pdt, dtype = pipe.device, pipe.param_dtype, pipe.pipe_dtype
     tae = TAEHV(checkpoint_path=args.tae_pth).to(dev).eval()
+
+    # ---- production preview path (variant D) ----
+    # TAEHV's last spatial upsample is replaced by identity and the frame is
+    # bicubically upscaled. Same decoder weights, no training, no new assets.
+    import torch.nn as nn
+    _dec = tae.decoder
+    _up_idx = [i for i, m in enumerate(_dec)
+               if type(m).__name__ == "Upsample"][-1]
+    _up_orig = _dec[_up_idx]
+    PREVIEW_ON = args.preview == "variant_d"
+    _tgt_hw = None
+
+    def decode_preview(z):
+        nonlocal _tgt_hw
+        _dec[_up_idx] = nn.Identity()
+        try:
+            with torch.no_grad():
+                fr = tae.decode_video(z.permute(1, 0, 2, 3).unsqueeze(0),
+                                      parallel=False, show_progress_bar=False)
+        finally:
+            _dec[_up_idx] = _up_orig
+        f = fr[0] if isinstance(fr, (list, tuple)) else fr
+        while f.dim() > 4:
+            f = f[0]
+        if f.dim() == 4:
+            f = f[:, f.shape[1] // 2] if f.shape[1] > 1 else f[:, 0]
+        if _tgt_hw is None:
+            _tgt_hw = (f.shape[-2] * 2, f.shape[-1] * 2)
+        # NOTE: torch.nn.functional is addressed explicitly here. `F` in this file
+        # is already the pixel frame count (F = (n_chunks-1)*4+1), so aliasing the
+        # functional module to `F` was a real name collision.
+        return torch.nn.functional.interpolate(
+            f.unsqueeze(0), size=_tgt_hw, mode="bicubic",
+            align_corners=False).squeeze(0).clamp(0, 1)
 
     key = hashlib.sha256(PROMPT.encode()).hexdigest()
     ctx = pipe.text_encoder([PROMPT], torch.device("cpu"))
@@ -200,6 +243,8 @@ def main():
     rows = []
     prev_pose = None
     stale_ev = None
+    pv_traces, blend_rows = [], []
+    prev_frame, pv_trace = None, None
 
     # ---- prewarm pass, in its own provenance domain ----
     prewarm_fp = None
@@ -257,6 +302,21 @@ def main():
                     cur = pipe.scheduler.add_noise(
                         x0, torch.randn(x0.shape, generator=g, device=dev,
                                         dtype=x0.dtype), timesteps[ti + 1])
+            if ti == 0 and PREVIEW_ON:
+                # the production preview: variant D on the step0 latent, decoded
+                # immediately so it can be shown ~231 ms after the input
+                torch.cuda.synchronize(); _tp = time.perf_counter()
+                prev_frame = decode_preview(x0)
+                torch.cuda.synchronize()
+                pv_ms = (time.perf_counter() - _tp) * 1000
+                pv_trace = PreviewTrace(
+                    chunk_index=snap["chunk_index"],
+                    generation_id=snap["generation_id"],
+                    applied_event_ids=snap["applied_event_ids"], source_step=0,
+                    step0_done_ns=time.perf_counter_ns(),
+                    preview_decoded_ns=time.perf_counter_ns(),
+                    preview_decode_ms=pv_ms)
+                pv_traces.append(pv_trace)
         with torch.amp.autocast("cuda", dtype=pdt), torch.no_grad():
             pipe.model(x=[x0], t=torch.stack([timesteps[-1] * 0.0]).to(dev),
                        cross_attn_first_call=False, **kw)
@@ -276,18 +336,50 @@ def main():
         # decode -> the real frame; t3 is set AFTER decode, for this frame only
         torch.cuda.synchronize(); t_c0 = time.perf_counter()
         with torch.no_grad():
-            tae.decode_video(x0.to(dev).permute(1, 0, 2, 3).unsqueeze(0),
-                             parallel=False, show_progress_bar=False)
+            _fr = tae.decode_video(x0.to(dev).permute(1, 0, 2, 3).unsqueeze(0),
+                                   parallel=False, show_progress_bar=False)
         torch.cuda.synchronize()
         dec_ms = (time.perf_counter() - t_c0) * 1000
         rt.mark_real_decoded(meta)
+
+        # ---- handoff: hard replace or the frozen 50 ms blend ----
+        # Display-side semantics, executed against a frame buffer because this
+        # runner is headless. By construction a linear blend leaves the total path
+        # length unchanged and divides the peak step, so the peak is divided by
+        # (n+1) where n is the number of intermediate display frames.
+        _rf = _fr[0] if isinstance(_fr, (list, tuple)) else _fr
+        while _rf.dim() > 4:
+            _rf = _rf[0]
+        if _rf.dim() == 4 and _rf.shape[1] > 1:
+            _rf = _rf[:, _rf.shape[1] // 2]
+        real_frame = _rf.float().clamp(0, 1)
+        n_blend = (max(1, int(round(args.blend_ms / (1000.0 / 60.0))))
+                   if args.blend_ms > 0 else 0)
+        handoff = None
+        if PREVIEW_ON and prev_frame is not None:
+            peak = float((prev_frame - real_frame).abs().mean())
+            handoff = dict(blend_ms=args.blend_ms, n_intermediate=n_blend,
+                           peak_hard_replace=peak,
+                           peak_blended=(peak / (n_blend + 1) if n_blend else peak))
+            blend_rows.append(dict(chunk=cid, **handoff))
+        prev_frame = real_frame
+
         gen_ms = (time.perf_counter() - t_gen) * 1000
         rows.append(dict(chunk=cid, gen_ms=gen_ms,
-                         applied=list(snap["applied_event_ids"])))
+                         applied=list(snap["applied_event_ids"]),
+                         preview_ms=(pv_trace.preview_decode_ms
+                                     if pv_trace is not None else None),
+                         handoff=handoff))
+        pv_trace = None
         prev_pose = chunk_pose
         print(f"  [chunk {cid}] gen {gen_ms:7.1f} ms  "
               f"applied={list(snap['applied_event_ids'])}  "
-              f"committed_chunk={rt.committed.chunk_index}", flush=True)
+              f"committed_chunk={rt.committed.chunk_index}"
+              + (f"  preview {rows[-1]['preview_ms']:.1f} ms"
+                 if rows[-1]["preview_ms"] else "")
+              + (f"  handoff peak {handoff['peak_hard_replace']:.4f} -> "
+                 f"{handoff['peak_blended']:.4f}" if handoff else ""),
+              flush=True)
 
     # ------------------------------------------------------------- reporting
     print()
@@ -361,11 +453,35 @@ def main():
               f"has a first_real_frame_id: {prov_ok}")
         print(f"    -> no prewarm provenance reached the authoritative lineage")
 
+    # ---- production preview path reporting ----
+    if PREVIEW_ON and pv_traces:
+        _pm = [p.preview_decode_ms for p in pv_traces if p.preview_decode_ms]
+        print()
+        print("  PRODUCTION PREVIEW (variant D, no training, no new weights)")
+        print(f"    preview decode p50        {statistics.median(_pm):.1f} ms")
+        print(f"    chunks with a preview     {len(pv_traces)}")
+        if blend_rows:
+            ph = statistics.median(r["peak_hard_replace"] for r in blend_rows)
+            pb = statistics.median(r["peak_blended"] for r in blend_rows)
+            print(f"    handoff peak (hard)       {ph:.4f}")
+            print(f"    handoff peak (blended)    {pb:.4f}  "
+                  f"({pb / ph:.2f}x, blend {args.blend_ms} ms)")
+        print("    t4/t5                     UNAVAILABLE (no renderer, no present")
+        print("                              signal; the blend here is DISPLAY")
+        print("                              SEMANTICS on a frame buffer, not a")
+        print("                              present-time measurement)")
+
     with open(f"{args.out_dir}/play_traces.json", "w") as f:
         json.dump(dict(weight=args.weight, pixel=[W, H], n_chunks=args.n_chunks,
                        rows=rows,
                        traces=rt.export(),
                        committed_chunk=rt.committed.chunk_index,
+                       preview=args.preview, blend_ms=args.blend_ms,
+                       preview_traces=[dict(chunk_index=p.chunk_index,
+                                            applied=list(p.applied_event_ids),
+                                            preview_decode_ms=p.preview_decode_ms)
+                                       for p in pv_traces],
+                       handoff=blend_rows,
                        accept_to_first_real_p50_ms=(statistics.median(lat)
                                              if lat else None),
                        t4_available=False, t5_available=False), f, indent=2)
