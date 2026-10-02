@@ -91,7 +91,9 @@ Windows:
 
 ![RTX 5060 Laptop 8GB interactive WASD demo](docs/demo/rtx5060_wasd_demo.gif)
 
-Real keyboard WASD over the frozen runtime, recorded from the viewer's own framebuffer (`demo_wasd.py`; h264 [mp4](docs/demo/rtx5060_wasd_demo.mp4) also in this repo). Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+Real keyboard WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+
+The GIF above is in this repo. The full-resolution h264 (`960×540`, 30 fps, 10 s) is not: this repo's `.gitignore` excludes `*.mp4`, so regenerate it with the command below, or attach it to an issue or PR to get a `user-attachments` URL and embed that.
 
 | From the keypress, model-side | RTX 5060 Laptop 8GB |
 |---|---:|

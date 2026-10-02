@@ -231,8 +231,24 @@ Recorded take, `--script --headless --weight bf16 --pixel 304x528 --blend_ms 50`
     chunks generated                        15 in ~13 s  (~870 ms/chunk, this take)
     UI                                    62.1 fps sustained, 960x540
 
-    artifact  docs/demo/rtx5060_wasd_demo.mp4   h264, 960x540, 30 fps, 293 frames, 9.77 s, 1.89 MB
-              docs/demo/rtx5060_wasd_demo.gif   640x360, 12 fps, 117 frames, 9.75 s, 3.01 MB
+    artifact  docs/demo/rtx5060_wasd_demo.gif   640x360, 12 fps, 117 frames, 9.75 s, 3.01 MB
+                                                 -> COMMITTED, embedded in README.md
+              docs/demo/rtx5060_wasd_demo.mp4   h264, 960x540, 30 fps, 293 frames, 9.77 s,
+                                                 1.89 MB -> NOT committed: .gitignore
+                                                 excludes *.mp4. Regenerate with the
+                                                 command below, or attach it to an issue
+                                                 or PR for a user-attachments URL.
+
+The viewer is not tied to one preset. Run once with `--weight fp8_lowmem` (no recording),
+all six GPU checks still PASS, and the numbers show the same trade the RC recorded:
+
+| preset | keypress → preview | keypress → authoritative | chunk period |
+|---|---:|---:|---:|
+| `bf16` (`performance`) — the shipped GIF | 647 ms p50 | 1199 ms p50 | ~870 ms |
+| `fp8_lowmem` (`lowmem`) | 896 ms p50 | 1574 ms p50 | ~1080 ms |
+
+So the FP8 weight-only path costs ~25-30% more interactive latency in the viewer too.
+It buys VRAM, not speed, independently of the earlier weight-only microbenchmark.
 
 Chunk time varies between runs (645-930 ms observed) with machine state, so the latency
 figures move with it. A second take measured p50 1042 ms (1034-1057); a run made while
