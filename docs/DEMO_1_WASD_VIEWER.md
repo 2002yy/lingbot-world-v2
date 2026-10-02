@@ -1,8 +1,9 @@
 # Demo-1: WASD viewer — recorded plan, not yet implemented
 
-Status: **PLANNED**. Work happens on this branch, `demo/wasd-viewer`, which is created
-from the community branch. The `rtx5060-interactive-rc1` tag is not involved and does
-not move.
+Status: **DELIVERED** on `demo/wasd-viewer`. See "What was actually built" and
+"Delivered numbers" at the end of this file; the plan above is kept unedited so the
+deviations are visible. The `rtx5060-interactive-rc1` tag was not involved and did not
+move.
 
 ## The correction this plan is built on
 
@@ -151,3 +152,178 @@ GPU:
 It is product surface, not optimisation. After it exists the community branch can become
 the repository's front page, and a stranger landing on the repo can understand what was
 built without reading the findings document.
+
+---
+
+# Delivered
+
+`demo_wasd.py`, plus `docs/demo/rtx5060_wasd_demo.mp4` and `.gif`. No other file was
+changed: not `play.py`, not `interactive_runtime.py`, nothing under `wan/`, and the tag
+did not move.
+
+## What was actually built
+
+    demo_wasd.py
+      Worker(Thread)          owns the runtime AND the session; the only thread that
+                              mutates either
+      WanSession              the frozen stack, wired as play.py wires it
+      MockSession             no GPU: real runtime, synthetic frames
+      Viewer                  pygame UI: keys, blend, HUD, recording
+      preflight_gpu()         refuses to start on retained VRAM (see below)
+
+Deviations from the plan, and why:
+
+1. **pygame had to be installed** (2.6.1, `--no-deps`). It was absent; OpenCV is present
+   but gives no keyup events, so a held `W` plus a fresh `D` cannot be told from two
+   separate presses. Held state is tracked from KEYDOWN/KEYUP instead of
+   `pygame.key.get_pressed()`, so posted and real events follow one path.
+2. **The session bench is duplicated from play.py**, not extracted. play.py is the RC's
+   frozen entrypoint; a shared module would mean editing it. It is the only duplicated
+   block and it is marked as such in the file.
+3. **The clock starts at the first authoritative frame.** `--seconds` and the recording
+   both begin there, so the cold first chunk is excluded. It is reported separately as
+   `ready_ms` (3.0 s measured) rather than hidden.
+4. **The HUD shows live numbers, not the plan's fixed "~231 / ~820 ms".** The fixed pair
+   turned out to describe a different measurement than this one (next section), so
+   printing it would have been misleading.
+
+Also added: `--headless` (SDL dummy, used for the recorded take), `--warmup_timeout`,
+`--out_json`, and `preflight_gpu()`.
+
+## The measured correction: boundary-aligned vs asynchronous input
+
+The RC's frozen `input -> first real frame` is **762 ms p50** (play.py; 820 ms class in
+the release notes). This viewer measures **~1.0-1.2 s** at the same geometry and weight.
+Neither number is wrong; they measure different things.
+
+play.py's input source is scripted, and `pump_input()` runs at the top of the chunk loop,
+so **every event is delivered exactly at a chunk boundary and its assign wait is
+identically zero for free.** A real keypress arrives at an arbitrary phase:
+
+    input -> authoritative = (remaining time of the in-flight chunk)
+                           + (one full chunk: 3 denoise steps + KV write + decode)
+                           + (decode)
+
+so it ranges from one chunk period to two. With a chunk of 650-930 ms on this machine,
+that is 0.9-1.5 s, which is what the recordings show. The first measurement run
+(`output/demo1/run_norec.json`) makes the structure visible directly:
+
+    ev   t0(s)   ->assign   ->commit   ->first-real
+     1   0.000      2344       3104         3130    <- cold first chunk, not representative
+     2   2.005       339       1099         1125
+     3   4.013       346        980         1006
+     4   6.010       297        857          882
+
+`assign` is the wait for the in-flight chunk; `assign -> commit` is the event's own chunk.
+Both are real stages, and a single "input to display" number hides the first one.
+
+**This is the honest interactive figure.** It is also the argument for any future latency
+work: the cheapest win available is not a faster kernel but making the in-flight chunk
+interruptible, which the EarlyExit reopening condition already describes.
+
+## Delivered numbers
+
+Recorded take, `--script --headless --weight bf16 --pixel 304x528 --blend_ms 50`:
+
+    keypress -> preview decoded        p50  647 ms   403 -  941 ms
+    keypress -> first affected REAL    p50 1199 ms   938 - 1455 ms
+    world ready (cold chunk)                3.0 s   excluded from --seconds
+    chunks generated                        15 in ~13 s  (~870 ms/chunk, this take)
+    UI                                    62.1 fps sustained, 960x540
+
+    artifact  docs/demo/rtx5060_wasd_demo.mp4   h264, 960x540, 30 fps, 293 frames, 9.77 s, 1.89 MB
+              docs/demo/rtx5060_wasd_demo.gif   640x360, 12 fps, 117 frames, 9.75 s, 3.01 MB
+
+Chunk time varies between runs (645-930 ms observed) with machine state, so the latency
+figures move with it. A second take measured p50 1042 ms (1034-1057); a run made while
+~7 GiB was still retained from a previous process measured p50 1296 ms. The take shipped
+is the clean-VRAM one.
+
+## Verified
+
+CPU/mock (`--mock`, no GPU, SDL dummy), 12/12 PASS. This is the part that must hold in
+CI, and it exercises the real runtime and the real worker loop, only the frames are
+synthetic:
+
+    worker produced no error
+    no deadlock: worker joined
+    intents emitted by the viewer
+    runtime accepted the intents (none lost to a bad handoff)
+    t0 is the KEY EVENT timestamp, preserved across the thread handoff
+    every accepted event reached a terminal status
+    every committed event has a first real frame
+    preview NEVER advanced committed state
+    authoritative lineage aligns with the committed chunk
+    t1 <= t2 <= t3 for every committed event
+    the blend ran and landed by assignment
+    frames were drawn
+
+On the real GPU, per recorded run:
+
+    real keyboard events produced InputEvents      PASS (4)
+    t0 came from the key event, not the drain      PASS (4/4 preserved, bit-identical)
+    preview never committed                        PASS (15 previews, 0 violations)
+    authoritative lineage aligned with events      PASS (4 committed)
+    no deadlock (worker joined)                    PASS
+    ran the full requested duration                PASS (10 s)
+
+"t0 preserved" is checked as exact equality between the timestamp the viewer stamped at
+the key event and the `t0_ns` the runtime stored, so the thread handoff is proven lossless
+rather than assumed. "Preview never committed" is checked structurally at the moment each
+preview is emitted: `committed.chunk_index` must still be `chunk_index - 1`.
+
+## Three findings recorded, not fixed
+
+1. **play.py's frame reduction picks a colour channel, not a frame.** `decode_video`
+   returns `[B, T, C, H, W]`; after dropping `B` the code tests `dim() == 4` and slices
+   `dim 1`, which on that layout is the CHANNEL axis. With `T=1` per chunk it stayed
+   self-consistent, so the handoff-peak and blend figures are real but are single-channel
+   (green) rather than image-level. Relative comparisons are unaffected; absolute peaks
+   are. `demo_wasd.py` extracts RGB properly and does not reuse it. Not fixed here because
+   play.py is the frozen RC entrypoint and this file may not change it.
+
+2. **A finished CUDA process does not release its VRAM at once on this machine.** After a
+   successful run, `nvidia-smi` showed 6981 MiB used with *no* process holding it; a
+   back-to-back run then died with `CUDA error: out of memory` inside `prewarm`, which is
+   a message that says nothing about the real cause. The memory was reclaimed on its own a
+   few minutes later (16 MiB used). `preflight_gpu()` now checks before starting.
+
+3. **The preflight has to run before torch is imported.** `torch.cuda.mem_get_info()`
+   reports ~6.87 GiB free in both the healthy and the retained-VRAM case, because torch's
+   own context accounts for the difference. Only the device-level reading separates them
+   (7.70 GiB vs 0.90 GiB), so the check uses nvidia-smi and no torch import.
+
+## How to run
+
+Live, with a window:
+
+    python demo_wasd.py
+
+(Not wired into `run.sh`: the plan for this work was new files only, and `run.sh` is
+release tooling. Adding a `demo` subcommand there is a reasonable follow-up.)
+
+Recorded, same as the shipped take:
+
+    python demo_wasd.py --script --headless --seconds 10 \
+      --record docs/demo/rtx5060_wasd_demo.mp4 --record_fps 30 \
+      --pixel 304x528 --weight bf16 --blend_ms 50 \
+      --out_json output/demo1/run_record.json
+
+CI, no GPU:
+
+    python demo_wasd.py --mock
+
+## What this does not claim
+
+- **No physical present.** The 50 ms blend is executed on our own framebuffer. There is
+  still no renderer and no present-completion signal, so `t4`/`t5` remain unavailable. The
+  HUD says "model-side" for this reason, and the measured figure is keypress-to-model-output,
+  not keypress-to-photon.
+- **No 60 Hz held-key sampling.** One keydown is one discrete control intent. Held-key,
+  OS key-repeat and keyup policy is not in the frozen contract and is not invented here.
+- **`--script` is not a human at a keyboard.** The shipped take uses it. It posts real
+  KEYDOWN/KEYUP events into the real queue, so they pass through the same handler and the
+  same stamping and the same runtime path a human's keys pass through; only the source of
+  the press is automated. For the live figure, pass no `--script`.
+- **One scene.** The take is `examples/04`. The preview path's cross-scene behaviour is
+  Preview-1C's evidence, not this file's.

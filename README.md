@@ -85,6 +85,32 @@ Windows:
 
 `~231 ms` is **model-side decoded preview timing**, not physical display latency. The `~820 ms` figure is the measured input-to-first-authoritative-real-frame path in the release run. Because this tree has no renderer-submit or physical-present signal, it intentionally does **not** substitute a proxy timestamp and call it input-to-display latency.
 
+**These two figures are boundary-aligned input.** The release run's input source is scripted and delivers each event at the top of the chunk loop, so its wait for the in-flight chunk is identically zero. A real keypress arrives at an arbitrary phase and must first let the current chunk finish, so the range a person experiences is one to two chunk periods — see the demo below, which measures exactly that.
+
+### Interactive WASD demo
+
+![RTX 5060 Laptop 8GB interactive WASD demo](docs/demo/rtx5060_wasd_demo.gif)
+
+Real keyboard WASD over the frozen runtime, recorded from the viewer's own framebuffer (`demo_wasd.py`; h264 [mp4](docs/demo/rtx5060_wasd_demo.mp4) also in this repo). Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+
+| From the keypress, model-side | RTX 5060 Laptop 8GB |
+|---|---:|
+| → preview decoded | **647 ms p50** (403–941) |
+| → first authoritative real frame | **1199 ms p50** (938–1455) |
+| Structural range | **1–2 chunk periods**, because the intent waits for the in-flight chunk |
+| Chunk period, this machine | **645–930 ms** (varies with machine state) |
+
+The spread is not noise and not a defect: an intent arriving just before a chunk boundary waits almost nothing, one arriving just after waits for most of a chunk. That wait is a real stage of the pipeline, and the boundary-aligned release figures do not include it. It is also the reason any future latency work on this stack should target making the in-flight chunk interruptible rather than making a kernel faster.
+
+```bash
+python demo_wasd.py                                    # live, windowed
+python demo_wasd.py --mock                             # CPU-only smoke, no GPU
+python demo_wasd.py --script --headless --seconds 10 \
+  --record docs/demo/rtx5060_wasd_demo.mp4 --record_fps 30   # the take above
+```
+
+The recorded take uses `--script`, which posts real KEYDOWN/KEYUP events through the same handler a human's keys go through — only the source of the press is automated. Run without `--script` for live play. See [docs/DEMO_1_WASD_VIEWER.md](docs/DEMO_1_WASD_VIEWER.md) for the acceptance checks and the three defects found while building it.
+
 ### Presets
 
 | preset | weights | peak reserved | min free | role |
