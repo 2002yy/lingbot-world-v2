@@ -10,6 +10,36 @@ This is a release candidate, not "the best experimental code so far". The distin
 matters because everything below is a decision with a traceable evidence source, and a
 future reader should be able to check a claim rather than relitigate a preference.
 
+Note on the two commit ids: this document is a snapshot written at `ec838b4`, which is
+where the frozen behaviour was established. The tagged release is `1c3053d`, one commit
+later, containing only the pre-publish audit that untracked three scratch files carrying
+absolute local paths. No code changed between them. The tag `rtx5060-interactive-rc1`
+points at `1c3053d`.
+
+## Erratum: the handoff image-difference metric is single-channel
+
+    play.py's handoff evaluation accidentally reduced the [B, T, C, H, W] decoder
+    output along the CHANNEL axis rather than the temporal one. After dropping B,
+    the dim()==4 branch tests dim 1, which on that layout is C, not T.
+
+    This does NOT affect model generation, committed state, or the t0 -> t3 latency
+    measurements. Those are unaffected and remain as published.
+
+    It DOES affect the absolute handoff image-difference metric. The reported ~0.25x
+    peak-step ratio is primarily a property of the 50 ms / 60 Hz linear blend
+    construction -- a linear blend in pixel space is collinear, so the total path
+    length is additive and the peak step divides by (n+1) by construction -- not a
+    colour-complete RGB quality measurement. The ratio is a real property of the
+    construction; only the absolute per-pixel magnitude is single-channel.
+
+    Found while building §Demo-1, which extracts RGB correctly and does not reuse
+    play.py's reduction.
+
+The RC is not modified by this erratum. The tooling is frozen deliberately, the tagged
+commit is public, and silently editing a published measurement would destroy the
+comparison baseline the whole document exists to provide. The historical evidence stands;
+the interpretation is corrected here, in one place, with the code path named.
+
 ## Why each boundary exists, and where the evidence is
 
     no fixed 2-step / 1-step     KV divergence is monotonic and unplateaued over 10

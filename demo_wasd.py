@@ -1057,34 +1057,50 @@ def build_args(argv=None):
     return ap.parse_args(argv)
 
 
-def preflight_gpu(args) -> None:
-    """Refuse to start when the GPU still holds a previous run's memory.
+def device_probe():
+    """Name, total and free memory, from nvidia-smi, WITHOUT importing torch.
 
-    Measured with nvidia-smi, on purpose, and BEFORE torch is imported. Once torch
-    has created its CUDA context the device is already ~0.9 GiB smaller, so
-    torch.cuda.mem_get_info() reports about 6.87 GiB free in both the healthy and
-    the dangerous case and cannot tell them apart. The device-level reading
-    separates them cleanly: 7.70 GiB healthy, 0.90 GiB when a finished run's VRAM
-    has not been reclaimed yet.
+    This has to be separate from and earlier than anything that touches
+    torch.cuda. Creating torch's CUDA context shrinks the device by about 0.9 GiB,
+    after which torch.cuda.mem_get_info() reports roughly 6.87 GiB free in both the
+    healthy case and the retained-VRAM case, so it cannot tell them apart. The
+    device-level reading separates them cleanly: 7.70 GiB healthy against 0.90 GiB
+    when a finished run's memory has not been reclaimed.
 
-    This matters because a run in that state dies inside a forward pass with a
-    CUDA OOM that says nothing about the real cause.
+    Returns None when nvidia-smi is unavailable, in which case the caller falls
+    back to torch and says so.
     """
     import subprocess
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.free,memory.total,memory.used",
+            ["nvidia-smi",
+             "--query-gpu=name,memory.free,memory.total,memory.used",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=30, check=True).stdout.strip()
-        free_mib, total_mib, used_mib = (int(x) for x in out.split(","))
-    except Exception as e:
-        print(f"  gpu memory  : preflight skipped ({type(e).__name__})")
-        return
+        name, free_mib, total_mib, used_mib = (x.strip() for x in out.split(","))
+        return dict(name=name, free=int(free_mib), total=int(total_mib),
+                    used=int(used_mib))
+    except Exception:
+        return None
 
+
+def preflight_gpu(args, dev) -> None:
+    """Refuse to start when the GPU still holds a previous run's memory.
+
+    Called before torch is imported, so that the numbers are device-level and the
+    abort happens before any CUDA context exists. A run in that state otherwise
+    dies inside a forward pass with a CUDA OOM that says nothing about the cause.
+    """
+    if dev is None:
+        print("  gpu memory  : preflight SKIPPED (nvidia-smi unavailable); if this "
+              "run dies in prewarm with a CUDA OOM, VRAM from a previous run has "
+              "probably not been released yet -- wait, or  wsl --shutdown")
+        return
     fib = 2 ** 20
-    # healthy baseline measured on this machine is 7884 MiB free; the observed
-    # bad state was 919 MiB. The stack's own peak is ~7104 MiB (bf16) / ~5846 (fp8),
-    # so 6500 MiB is a real floor rather than a guessed one.
+    free_mib, total_mib = dev["free"], dev["total"]
+    # healthy baseline measured on this machine is 7884 MiB free; the observed bad
+    # state was 919 MiB. The stack's own peak is ~7104 MiB (bf16) / ~5846 MiB (fp8),
+    # so this floor is derived from measurements rather than guessed.
     floor_mib = 6500 if args.weight == "bf16" else 5800
     warn_mib = 7500 if args.weight == "bf16" else 6800
     print(f"  gpu memory  : {free_mib/fib:.2f} GiB free of {total_mib/fib:.2f} GiB "
@@ -1105,14 +1121,23 @@ def main():
     if args.mock:
         sys.exit(run_mock_smoke(args))
 
+    # BEFORE ANY TORCH IMPORT. The whole point of the device-level check is that it
+    # has to happen while no CUDA context exists; importing torch here would create
+    # one and silently invalidate the measurement the check is based on.
+    dev = device_probe()
+    preflight_gpu(args, dev)
+
     import torch
-    name = (torch.cuda.get_device_name(0)
-            if torch.cuda.is_available() else "CPU (no CUDA)")
-    try:
-        gib = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
-        title = f"{name} · {gib:.0f} GB"
-    except Exception:
-        title = name
+    if dev is not None:
+        title = f"{dev['name']} · {dev['total'] / 1024:.0f} GB"
+    else:
+        name = (torch.cuda.get_device_name(0)
+                if torch.cuda.is_available() else "CPU (no CUDA)")
+        try:
+            gib = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
+            title = f"{name} · {gib:.0f} GB"
+        except Exception:
+            title = name
 
     print("=" * 78)
     print("  §Demo-1 — WASD viewer")
@@ -1127,8 +1152,6 @@ def main():
              if args.record else ""))
     print("  t4/t5       : UNAVAILABLE (no renderer, no present signal)")
     print("=" * 78, flush=True)
-
-    preflight_gpu(args)
 
     # The runtime owns the committed camera, and it starts from the same base pose
     # play.py uses -- not from identity. The reduction is applied to deltas, so a

@@ -50,7 +50,7 @@ Run the **LingBot-World-V2-1.3B-Causal-Fast** world model interactively on a **s
 - **Live WASD interaction** instead of a predefined camera trajectory.
 - **~231 ms causal visual feedback** through a zero-training preview path.
 - **Preview and authority are separate:** speculative frames cannot commit world state or claim authoritative latency.
-- A **50 ms preview → authoritative handoff** whose 60 Hz-equivalent evaluation reduced the peak correction step to about **0.25×** hard replacement.
+- A **50 ms preview → authoritative handoff** whose 60 Hz-equivalent evaluation reduced the peak correction step to about **0.25×** hard replacement. See the erratum in [`docs/RC_FROZEN.md`](docs/RC_FROZEN.md): the ratio is a property of the linear blend construction, but the absolute image-difference it was computed from is single-channel because of a reduction bug in `play.py`.
 - **Single-GPU 8 GB deployment**, validated on an RTX 5060 Laptop GPU.
 - Frozen `performance` (BF16) and `lowmem` (weight-only FP8) deployment presets.
 - Release tooling, runtime tracing, fail-closed state commits, exactly-once control application, stale-event handling, and prewarm isolation.
@@ -87,11 +87,13 @@ Windows:
 
 **These two figures are boundary-aligned input.** The release run's input source is scripted and delivers each event at the top of the chunk loop, so its wait for the in-flight chunk is identically zero. A real keypress arrives at an arbitrary phase and must first let the current chunk finish, so the range a person experiences is one to two chunk periods — see the demo below, which measures exactly that.
 
-### Interactive WASD demo
+### WASD interaction demo
 
-![RTX 5060 Laptop 8GB interactive WASD demo](docs/demo/rtx5060_wasd_demo.gif)
+![RTX 5060 Laptop 8GB WASD interaction demo](docs/demo/rtx5060_wasd_demo.gif)
 
-Real keyboard WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+
+**This take is scripted, not hand-driven.** `--script` posts real `KEYDOWN`/`KEYUP` events, so they pass through the same handler, the same timestamping and the same runtime path a human's keys pass through — but the source of the press is automated. The claim this supports is "WASD interaction works and here is what it looks like", not "a person was typing". A hand-driven take would be labelled **Live keyboard WASD**.
 
 The GIF above is in this repo. The full-resolution h264 (`960×540`, 30 fps, 10 s) is not: this repo's `.gitignore` excludes `*.mp4`, so regenerate it with the command below, or attach it to an issue or PR to get a `user-attachments` URL and embed that.
 
