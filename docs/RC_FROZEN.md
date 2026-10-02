@@ -79,6 +79,32 @@ the interpretation is corrected here, in one place, with the code path named.
     physical present  UNKNOWN
     input -> display  UNKNOWN
 
+### Latency clarification added after §Demo-1
+
+**The four figures directly above are boundary-aligned measurements from the frozen
+`play.py` harness. They exclude the arbitrary-phase wait for an already in-flight chunk,
+and they should not be read as typical keyboard latency.**
+
+`play.py`'s input source is scripted and delivers each event at the top of the chunk loop,
+so the wait for the in-flight chunk is identically zero for free. A real keypress arrives
+at an arbitrary phase. A later N=30 randomized-phase characterization measured:
+
+    keypress -> preview decoded              p50  593 ms   p90  788 ms   best 232 ms
+    keypress -> first authoritative frame    p50 1033 ms   p90 1269 ms   best 643 ms
+      of which: wait for the in-flight chunk p50  414 ms   p90  597 ms
+
+So the decomposition of the typical figure is 414 (in-flight wait) + 591 (the event's own
+chunk) + ~28 (decode), and the ~231 ms above reappears there as the **best observed**
+case, which is the favourable end of the phase distribution rather than the typical one.
+
+The original numbers remain valid for the measurement condition they were taken under.
+Nothing here is retracted; the scope is stated. See `docs/DEMO_1_WASD_VIEWER.md`.
+
+Note also that line 112 below, in the reopening conditions, says "preview still feels slow
+at 231 ms". That is a real user-facing complaint and it is now quantified: the subjective
+slowness of an arbitrary-phase keypress is 593 ms p50 to preview, of which 414 ms is spent
+waiting for a chunk that is already running and that the input cannot influence.
+
 Those three are unknown on purpose. Reporting a proxy as a measurement is what earlier
 stages spent effort undoing, and the discipline of knowing what has not been measured is
 worth more here than another benchmark table.

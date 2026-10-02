@@ -43,7 +43,15 @@ The real-time version of LingBot-World-Infinity is available on two platforms. W
 
 Run the **LingBot-World-V2-1.3B-Causal-Fast** world model interactively on a **single RTX 5060 Laptop GPU with 8 GB VRAM**, with live WASD camera control, a low-latency causal preview, and a correctness-preserving authoritative world state.
 
-**RTX 5060 Laptop 8GB · 304×528 · ~231 ms causal preview · ~820 ms first authoritative real frame · zero additional training**
+**RTX 5060 Laptop 8GB · 304×528 · zero additional training**
+
+```
+593 ms p50   arbitrary-phase causal preview
+1.03 s p50   first authoritative real frame
+232 ms       best observed preview
+```
+
+Measured over N=30 single-key events at randomized offsets, so the input's phase against the chunk boundary is uniform — what a real keypress actually experiences. Boundary-aligned harness measurements (favourable phase, wait for the in-flight chunk excluded) are `~231 ms` preview and `~820 ms` authority; see [Scope of the latency figures](#scope-of-the-latency-figures).
 
 ### What this adds
 
@@ -69,6 +77,17 @@ Windows:
 .\setup.ps1
 .\run.ps1 play
 ```
+
+### Scope of the latency figures
+
+Two different conditions are measured in this work, and the headline quotes the second.
+
+| Condition | preview | first authoritative real frame |
+|---|---:|---:|
+| **Boundary-aligned harness** (`play.py`, scripted source, wait for the in-flight chunk is zero for free) | ~231 ms | ~820 ms |
+| **Arbitrary-phase keypress** (N=30, randomized offsets) | **593 ms p50** (p90 788) | **1033 ms p50** (p90 1269) |
+
+The typical figure decomposes as **414 ms** waiting for the in-flight chunk + **591 ms** for the event's own chunk + ~28 ms decode. Only the second term is the event's own computation; the first is a stage the boundary-aligned number does not contain, because a scripted source that only ever fires at a chunk boundary never pays it. The best observed preview, 232 ms, is where the release's `~231 ms` lands.
 
 ### Measured interaction timeline
 
