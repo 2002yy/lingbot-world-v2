@@ -97,14 +97,20 @@ WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each p
 
 The GIF above is in this repo. The full-resolution h264 (`960×540`, 30 fps, 10 s) is not: this repo's `.gitignore` excludes `*.mp4`, so regenerate it with the command below, or attach it to an issue or PR to get a `user-attachments` URL and embed that.
 
-| From the keypress, model-side | RTX 5060 Laptop 8GB |
-|---|---:|
-| → preview decoded | **647 ms p50** (403–941) |
-| → first authoritative real frame | **1199 ms p50** (938–1455) |
-| Structural range | **1–2 chunk periods**, because the intent waits for the in-flight chunk |
-| Chunk period, this machine | **645–930 ms** (varies with machine state) |
+From the keypress, model-side, at 304×528 bf16. **n=30**, single-key events fired at randomized offsets so the input's phase against the chunk boundary is uniform — `python demo_wasd.py --phase_n 30`:
 
-The spread is not noise and not a defect: an intent arriving just before a chunk boundary waits almost nothing, one arriving just after waits for most of a chunk. That wait is a real stage of the pipeline, and the boundary-aligned release figures do not include it. It is also the reason any future latency work on this stack should target making the in-flight chunk interruptible rather than making a kernel faster.
+| | p50 | p90 | best | worst |
+|---|---:|---:|---:|---:|
+| → preview decoded | **593 ms** | 788 ms | **232 ms** | 827 ms |
+| → first authoritative real frame | **1033 ms** | 1269 ms | 643 ms | 1301 ms |
+| of which: wait for the in-flight chunk | 414 ms | 597 ms | 63 ms | 641 ms |
+| of which: the event's own chunk | 591 ms | 667 ms | 553 ms | 683 ms |
+
+The decomposition is the point. That first row is the term the boundary-aligned release figures get to set to zero for free, and it is not noise: it is bounded by the chunk period (63–641 ms observed against a ~650 ms chunk), because an intent arriving just before a boundary waits almost nothing and one arriving just after waits for most of a chunk.
+
+Note what the "best" column is: **232 ms to preview is the release's ~231 ms.** That figure is real, it is simply the favourable end of the phase distribution rather than the typical one. The p50 is 593 ms.
+
+This is also where any future latency work has to aim. Faster kernels shrink both the in-flight wait and the event's own chunk; only making the in-flight chunk interruptible can remove most of the first term — and that is a different, harder problem than an early-exit, because the runtime's queue/frontier semantics deliberately claim a new input to the *next* chunk.
 
 ```bash
 python demo_wasd.py                                    # live, windowed

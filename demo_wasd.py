@@ -499,6 +499,15 @@ class WanSession:
         torch = self.torch
         pipe = self.pipe
 
+        # --n_chunks sizes BOTH the per-chunk noise tensor and the condition latent,
+        # and this viewer runs open-ended, so it can outlive them. Without this the
+        # failure is an IndexError inside split() that says nothing about the cause.
+        if cid >= self.noise.shape[1]:
+            raise RuntimeError(
+                f"chunk {cid} is past --n_chunks {self.noise.shape[1]}. That flag "
+                f"sizes the per-chunk noise AND the condition latent, so a longer "
+                f"run needs a larger value: raise --n_chunks and re-run.")
+
         chunk_pose = snap["candidate_camera"].pose
         rel0 = (np.eye(4) if self._prev_pose is None
                 else np.linalg.inv(self._prev_pose) @ chunk_pose)
@@ -664,6 +673,23 @@ class Viewer:
                                 float(self.UI_FPS), args.record_fps)
         self._seq_idx = 0
         self._seq_t0: Optional[float] = None
+        # --phase_n: a characterization run, not a performance. Events fire at
+        # randomized offsets so the input's phase against the chunk boundary is
+        # uniform, which is what a real keypress actually experiences. Single keys
+        # only, so each fired event is exactly one intent and one measurement.
+        self._phase_plan = None
+        self._phase_idx = 0
+        self._phase_settle_s: Optional[float] = None
+        if args.phase_n:
+            import random
+            rng = random.Random(args.phase_seed)
+            cycle = ["W", "D", "S", "A"]
+            t = 1.0
+            plan = []
+            for i in range(args.phase_n):
+                plan.append((t, cycle[i % len(cycle)]))
+                t += rng.uniform(args.phase_lo, args.phase_hi)
+            self._phase_plan = plan
         # The world is "ready" at the first authoritative frame. The script clock
         # and the recording both start there, so the take does not include the cold
         # first chunk -- which is a real cost but not a representative one, and
@@ -718,6 +744,27 @@ class Viewer:
                 # keypress goes through, so the input path is the real one and
                 # only the source of the press is automated.
                 self.pygame.event.post(ev)
+
+    def _run_phase(self, now_s: float):
+        """Fire the next characterization event when its randomized time arrives.
+
+        The held set is released first and the new key pressed second, so the
+        handler composes the intent from held state exactly as it does for a hand:
+        a lone key gives +0.6 forward or +-0.8 yaw, and a chord would give the
+        combined intent. Single keys here, so one event is one intent.
+        """
+        pygame = self.pygame
+        table = {"W": pygame.K_w, "A": pygame.K_a,
+                 "S": pygame.K_s, "D": pygame.K_d}
+        while (self._phase_idx < len(self._phase_plan)
+               and now_s >= self._phase_plan[self._phase_idx][0]):
+            _, name = self._phase_plan[self._phase_idx]
+            self._phase_idx += 1
+            for k in sorted(self.held_keys):
+                pygame.event.post(pygame.event.Event(
+                    pygame.KEYUP, key=table[k], mod=0, unicode="", scancode=0))
+            pygame.event.post(pygame.event.Event(
+                pygame.KEYDOWN, key=table[name], mod=0, unicode="", scancode=0))
 
     # -- frames -----------------------------------------------------------
     def _scaled_f32(self, frame_hwc_u8: np.ndarray) -> np.ndarray:
@@ -889,7 +936,15 @@ class Viewer:
         while not self.stop.is_set():
             now = time.perf_counter()
             if self._ready:
-                if seconds and (now - self._seq_t0) >= seconds:
+                if self._phase_plan is not None:
+                    # a characterization run ends when the plan is done and the last
+                    # measurement has landed, not on a wall-clock duration
+                    if self._phase_idx >= len(self._phase_plan):
+                        if self._phase_settle_s is None:
+                            self._phase_settle_s = now
+                        elif (now - self._phase_settle_s) >= self.args.phase_settle:
+                            break
+                elif seconds and (now - self._seq_t0) >= seconds:
                     break
             elif (now - self._t_wall_start) > self.args.warmup_timeout:
                 print(f"[viewer] warmup timeout after "
@@ -897,7 +952,9 @@ class Viewer:
                       f"arrived, so nothing could be verified")
                 break
 
-            if self.args.script and self._ready:
+            if self._phase_plan is not None and self._ready:
+                self._run_phase(now - self._seq_t0)
+            elif self.args.script and self._ready:
                 self._run_script(now - self._seq_t0)
             for e in pygame.event.get():
                 if e.type in (pygame.KEYDOWN, pygame.KEYUP):
@@ -1052,6 +1109,15 @@ def build_args(argv=None):
                     help="SDL dummy driver: render and record with no window")
     ap.add_argument("--mock", action="store_true",
                     help="CPU/mock smoke: real runtime, synthetic frames, no GPU")
+    ap.add_argument("--phase_n", type=int, default=0,
+                    help="characterization run: fire this many single-key events at "
+                         "randomized offsets so the input phase against the chunk "
+                         "boundary is uniform, then report p50/p90. Distinct from a "
+                         "demo take: this is the statistics, the video is the picture.")
+    ap.add_argument("--phase_seed", type=int, default=7)
+    ap.add_argument("--phase_lo", type=float, default=1.2)
+    ap.add_argument("--phase_hi", type=float, default=2.6)
+    ap.add_argument("--phase_settle", type=float, default=5.0)
     ap.add_argument("--mock_step_ms", type=float, default=90.0)
     ap.add_argument("--out_json", default=None)
     return ap.parse_args(argv)
@@ -1096,23 +1162,23 @@ def preflight_gpu(args, dev) -> None:
               "run dies in prewarm with a CUDA OOM, VRAM from a previous run has "
               "probably not been released yet -- wait, or  wsl --shutdown")
         return
-    fib = 2 ** 20
+    gib = 1024.0                       # nvidia-smi already reports MiB
     free_mib, total_mib = dev["free"], dev["total"]
     # healthy baseline measured on this machine is 7884 MiB free; the observed bad
     # state was 919 MiB. The stack's own peak is ~7104 MiB (bf16) / ~5846 MiB (fp8),
     # so this floor is derived from measurements rather than guessed.
     floor_mib = 6500 if args.weight == "bf16" else 5800
     warn_mib = 7500 if args.weight == "bf16" else 6800
-    print(f"  gpu memory  : {free_mib/fib:.2f} GiB free of {total_mib/fib:.2f} GiB "
-          f"({args.weight} floor {floor_mib/fib:.2f} GiB, device-level, pre-torch)")
+    print(f"  gpu memory  : {free_mib/gib:.2f} GiB free of {total_mib/gib:.2f} GiB "
+          f"({args.weight} floor {floor_mib/gib:.2f} GiB, device-level, pre-torch)")
     if free_mib < floor_mib:
-        print(f"  ABORT: only {free_mib/fib:.2f} GiB free, below the "
-              f"{floor_mib/fib:.2f} GiB floor for {args.weight} at {args.pixel}.")
+        print(f"  ABORT: only {free_mib/gib:.2f} GiB free, below the "
+              f"{floor_mib/gib:.2f} GiB floor for {args.weight} at {args.pixel}.")
         print("         A previously finished run has not released its VRAM yet.")
         print("         Wait a minute, or reset the VM from Windows:  wsl --shutdown")
         sys.exit(2)
     if free_mib < warn_mib:
-        print(f"  WARNING: below the {warn_mib/fib:.2f} GiB this stack normally starts "
+        print(f"  WARNING: below the {warn_mib/gib:.2f} GiB this stack normally starts "
               f"from; the run may OOM. Consider --weight fp8_lowmem.")
 
 
@@ -1145,7 +1211,9 @@ def main():
     print(f"  geometry    : {args.pixel}   weight {args.weight}   "
           f"preview {args.preview}   blend {args.blend_ms} ms")
     print("  input       : "
-          + ("SCRIPT_SEQUENCE, posted as real key events" if args.script
+          + (f"PHASE CHARACTERIZATION, {args.phase_n} events at randomized offsets"
+             if args.phase_n else
+             "SCRIPT_SEQUENCE, posted as real key events" if args.script
              else "live keyboard"))
     print(f"  window      : {args.window[0]}x{args.window[1]}"
           + (f"   recording -> {args.record} @ {args.record_fps} fps"
@@ -1203,27 +1271,54 @@ def main():
     print(f"  authoritative lineage aligned with events      "
           f"{yn(len(committed) > 0)}  ({len(committed)} committed)")
     print(f"  no deadlock (worker joined)                    {yn(not worker.is_alive())}")
-    print(f"  ran the full requested duration                "
-          f"{yn(stats['frames_drawn'] > 0)}  ({args.seconds:.0f} s requested)")
+    if args.phase_n:
+        print(f"  fired every planned event and measured it      "
+              f"{yn(stats['intents_sent'] == args.phase_n)}  "
+              f"({stats['intents_sent']}/{args.phase_n} fired; "
+              f"{inv['chunks']} chunks generated)")
+    else:
+        print(f"  ran the full requested duration                "
+              f"{yn(stats['frames_drawn'] > 0)}  ({args.seconds:.0f} s requested)")
+    def pct(xs, q):
+        if not xs:
+            return None
+        s = sorted(xs)
+        # nearest-rank, so p50 and p90 are always numbers that were observed rather
+        # than interpolations of them
+        i = min(len(s) - 1, max(0, int(round(q / 100.0 * len(s) + 0.5)) - 1))
+        return s[i]
+
+    def dist(name, xs):
+        if not xs:
+            return
+        print(f"  {name:<34} n={len(xs):<3} "
+              f"p50 {pct(xs,50):>6.0f}  p90 {pct(xs,90):>6.0f}  "
+              f"min {min(xs):>6.0f}  max {max(xs):>6.0f}  ms")
+
     pvl = [p["model_ms"] for p in viewer.preview_trace]
     if lat or pvl:
         print()
-        if pvl:
-            print(f"  keypress -> preview decoded:         n={len(pvl)}  "
-                  f"p50 {statistics.median(pvl):.0f} ms  "
-                  f"min {min(pvl):.0f}  max {max(pvl):.0f}")
-        if lat:
-            print(f"  keypress -> first affected REAL:     n={len(lat)}  "
-                  f"p50 {statistics.median(lat):.0f} ms  "
-                  f"min {min(lat):.0f}  max {max(lat):.0f}")
+        dist("keypress -> preview decoded:", pvl)
+        dist("keypress -> first affected REAL:", lat)
+        # The assign wait IS the residual of the in-flight chunk, so it is exactly
+        # the term the boundary-aligned release figures set to zero for free.
+        # Reporting it separately is the point: it is what a future preemption or
+        # early-exit attempt would have to shrink.
+        waits = [(r.t1_assign_ns - r.t0_accept_ns) / 1e6 for r in committed
+                 if r.t1_assign_ns is not None]
+        owns = [(r.t2_commit_ns - r.t1_assign_ns) / 1e6 for r in committed
+                if r.t1_assign_ns is not None and r.t2_commit_ns is not None]
+        print()
+        dist("  of which: wait for in-flight chunk:", waits)
+        dist("  of which: the event's own chunk:", owns)
         print()
         print("  NOTE ON THE FROZEN FIGURE. play.py's ~762 ms p50 is measured with a")
         print("  scripted source that only ever delivers input at a chunk boundary, so")
-        print("  its assign wait is identically zero. A real keypress arrives at an")
-        print("  arbitrary phase: it must first let the in-flight chunk finish, so the")
-        print("  honest steady state is (residual of the in-flight chunk) + (one full")
-        print("  chunk) + decode. Both numbers are correct; they measure different")
-        print("  things, and this one is the one a person actually experiences.")
+        print("  its assign wait is identically zero -- for free. A real keypress")
+        print("  arrives at an arbitrary phase and must first let the in-flight chunk")
+        print("  finish, so that wait is a real stage the boundary-aligned number does")
+        print("  not contain. Both numbers are correct; they measure different things,")
+        print("  and this one is what a person actually experiences.")
     if viewer.ready_ms:
         print(f"  world became ready after                "
               f"{viewer.ready_ms/1000:.1f} s (cold chunk, excluded from --seconds)")
