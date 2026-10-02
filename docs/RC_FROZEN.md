@@ -16,6 +16,14 @@ later, containing only the pre-publish audit that untracked three scratch files 
 absolute local paths. No code changed between them. The tag `rtx5060-interactive-rc1`
 points at `1c3053d`.
 
+One historical detail deliberately left alone: the annotated tag's own message still says
+"a training-free preview path at ~231 ms". That is release prose written before the
+arbitrary-phase measurement existed, and the tag is immutable — re-tagging to reword a
+message would break the one thing the tag is for. The correction lives in the
+clarification below and in `README.md`. If a formal GitHub Release page is ever published,
+its notes should carry the same sentence: 231 ms is boundary-aligned / best-phase, and the
+arbitrary-phase N=30 p50 is 593 ms.
+
 ## Erratum: the handoff image-difference metric is single-channel
 
     play.py's handoff evaluation accidentally reduced the [B, T, C, H, W] decoder
