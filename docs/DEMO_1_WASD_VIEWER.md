@@ -255,6 +255,41 @@ figures move with it. A second take measured p50 1042 ms (1034-1057); a run made
 ~7 GiB was still retained from a previous process measured p50 1296 ms. The take shipped
 is the clean-VRAM one.
 
+## Phase characterization (this is the number to quote, not the 4-event take)
+
+A demo take has four input events, which is a picture and not a distribution. To
+characterize what a person actually gets, `--phase_n` fires single-key events at
+randomized offsets so the input's phase against the chunk boundary is uniform. 30 events,
+seed 7, inter-arrival uniform(1.2, 2.6) s against a ~650 ms chunk, 91 chunks generated,
+no recording:
+
+| from the keypress, model-side | p50 | p90 | best | worst |
+|---|---:|---:|---:|---:|
+| → preview decoded | **593 ms** | 788 ms | **232 ms** | 827 ms |
+| → first authoritative real frame | **1033 ms** | 1269 ms | 643 ms | 1301 ms |
+| of which: wait for the in-flight chunk | 414 ms | 597 ms | 63 ms | 641 ms |
+| of which: the event's own chunk | 591 ms | 667 ms | 553 ms | 683 ms |
+
+All 30 committed, 0 preview-commit violations, t0 preserved 30/30.
+
+Three things this settles.
+
+1. **The 762 ms release figure is the zero-phase case.** The wait-for-in-flight term is
+   what it sets to zero for free, and here that term is 414 ms p50. The sum checks out:
+   414 + 591 + ~28 ms decode = 1033 ms.
+
+2. **232 ms to preview is the release's ~231 ms.** That figure is not wrong; it is the
+   favourable end of the phase distribution. Observed minimum 232 ms against a p50 of
+   593 ms. It occurs when an intent lands just before a chunk boundary (wait 63 ms).
+
+3. **The wait is bounded by the chunk period, not by noise.** 63–641 ms against a ~650 ms
+   chunk, which is exactly what uniform phase predicts.
+
+The run also exposed a real defect: `--n_chunks` sizes both the per-chunk noise tensor and
+the condition latent, and this viewer runs open-ended, so a long run would have died with
+an `IndexError` inside `split()` that says nothing about the cause. It now raises a named
+error instead.
+
 ## Verified
 
 CPU/mock (`--mock`, no GPU, SDL dummy), 12/12 PASS. This is the part that must hold in
