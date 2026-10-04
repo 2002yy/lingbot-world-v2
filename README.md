@@ -108,15 +108,13 @@ The typical figure decomposes as **414 ms** waiting for the in-flight chunk + **
 
 ### WASD interaction demo
 
-<video src="https://github.com/2002yy/lingbot-world-v2/releases/download/demo-media/rtx5060_wasd_demo.mp4" width="100%" controls muted loop playsinline></video>
-
 ![RTX 5060 Laptop 8GB WASD interaction demo](docs/demo/rtx5060_wasd_demo.gif)
 
 WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
 
 **This take is scripted, not hand-driven.** `--script` posts real `KEYDOWN`/`KEYUP` events, so they pass through the same handler, the same timestamping and the same runtime path a human's keys pass through — but the source of the press is automated. The claim this supports is "WASD interaction works and here is what it looks like", not "a person was typing". A hand-driven take would be labelled **Live keyboard WASD**.
 
-The player above and the GIF below are the same take. The h264 (`960×540`, 30 fps, 10 s) is hosted as a release asset rather than committed, because this repo's `.gitignore` excludes `*.mp4` and because GitHub's markdown sanitizer strips `<video>` when its `src` is a relative path. Regenerate it with the command below if you want it locally.
+The GIF above is the whole take, in this repo. The full-resolution h264 (`960×540`, 30 fps, 10 s) is attached to the [**demo-media** release](https://github.com/2002yy/lingbot-world-v2/releases/tag/demo-media) rather than committed — this repo's `.gitignore` excludes `*.mp4`, and GitHub's markdown sanitizer does not render an inline `<video>` player from a release asset URL either, so it is a link instead. Regenerate it with the command below if you want it locally.
 
 From the keypress, model-side, at 304×528 bf16. **n=30**, single-key events fired at randomized offsets so the input's phase against the chunk boundary is uniform — `python demo_wasd.py --phase_n 30`:
 
