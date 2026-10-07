@@ -1127,12 +1127,27 @@ class Viewer:
         table = {"W": pygame.K_w, "A": pygame.K_a,
                  "S": pygame.K_s, "D": pygame.K_d}
         cycle = ["W", "D", "S", "A"]
-        period = max(0.01, self.args.input_period_ms / 1000.0)
+        load = getattr(self.args, "load", "rapid")
+        if load == "hold":
+            # HOLD deliberately re-sends the SAME intent. The real keyboard path
+            # suppresses key repeat, so production never produces this -- which is
+            # itself the answer to "does holding a direction cause pointless
+            # preemption". This load is the stronger test of the semantic check, run
+            # through the real handler by releasing and pressing the same key so the
+            # intent genuinely repeats.
+            period = max(0.01, self.args.input_period_ms / 1000.0)
+            name = "W"
+        else:
+            period = max(0.01, self.args.input_period_ms / 1000.0)
+            if load == "normal":
+                # a realistic turn rhythm: roughly a second per direction change,
+                # alternating so every arrival is a genuine change
+                period = 0.9
+            name = cycle[self._shake_i % len(cycle)]
         if self._shake_next is None:
             self._shake_next = 0.0
         while now_s >= self._shake_next:
             self._shake_next += period
-            name = cycle[self._shake_i % len(cycle)]
             self._shake_i += 1
             for k in sorted(self.held_keys):
                 pygame.event.post(pygame.event.Event(
@@ -1598,6 +1613,13 @@ def build_args(argv=None):
                          "so intents actually land inside a running chunk, with "
                          "preemption on. Reports BEHAVIOURAL gates only; it makes no "
                          "claim about latency gain, because that is 3B-C.")
+    ap.add_argument("--arm", default="B",
+                    help="label for the §Latency-3B-C A/B: 'A' (baseline, preemption "
+                         "disabled) or 'B' (policy v1). Recorded, not interpreted.")
+    ap.add_argument("--load", default="rapid", choices=["hold", "normal", "rapid"],
+                    help="shakedown input load. hold re-sends the same intent (the "
+                         "semantic check's stress case), normal is a ~1 s turn rhythm, "
+                         "rapid is ~200 ms direction changes")
     ap.add_argument("--input_period_ms", type=float, default=200.0,
                     help="shakedown input rate. 200 ms against a ~600 ms chunk means "
                          "most chunks see an intent mid-flight")
@@ -1984,6 +2006,13 @@ def main():
             print(f"      input -> renderer submit p50 {statistics.median(t4v):.0f} ms")
         print(f"      chunks generated         {inv['chunks']}")
         print(f"      preemption rate          {n_pre}/{inv['chunks']} chunks")
+        # wasted work, in forwards: attempt A executed `forward` forwards before being
+        # discarded, and the replay redoes the whole chunk. A chunk costs 4 forwards, so
+        # this is directly comparable to the chunk count.
+        wasted_fwd = sum(r["forward"] for r in pt)
+        total_fwd = inv["chunks"] * 4
+        print(f"      wasted forward work      {wasted_fwd} of {total_fwd} "
+              f"({100.0 * wasted_fwd / max(1, total_fwd):.1f}%)")
 
     if args.out_json:
         with open(args.out_json, "w") as f:
@@ -2005,7 +2034,19 @@ def main():
                            blend_complete_stamps=viewer.blend_complete_stamped,
                            submitted=viewer.submitted,
                            t4_available=(viewer.display_driver != "dummy"),
-                           t5_available=False), f, indent=2)
+                           t5_available=False,
+                           # §Latency-3B-C A/B provenance, so a result cannot be read
+                           # without knowing which arm and load produced it
+                           arm=args.arm,
+                           load=args.load,
+                           preempt_boundaries=list(worker.policy.boundaries),
+                           preemption_trace=worker.preemption_trace,
+                           admission_tally=worker.policy.tally,
+                           wasted_forwards=sum(r["forward"]
+                                               for r in worker.preemption_trace),
+                           observed_to_admitted=[
+                               r["observed_to_admitted_ms"]
+                               for r in worker.preemption_trace]), f, indent=2)
         print(f"  wrote {args.out_json}")
 
 
