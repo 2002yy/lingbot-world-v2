@@ -160,9 +160,18 @@ def main():
         ea = rt2.accept(dict(E_OLD))
         snap2 = rt2.begin_chunk()
         preempted = False
+        # THE ORACLE TESTS THE MECHANISM, NOT THE ADMISSION POLICY. It therefore uses a
+        # deliberately permissive policy covering every cut point and any remaining
+        # work, so that the rebase path is exercised wherever the test says the input
+        # arrived. The policy's own behaviour is gated separately in C1. Passing no
+        # policy at all silently disabled detection and made this oracle report FAIL --
+        # which is exactly what re-running it after every change is for.
         try:
-            x0b = sess.denoise(snap2, snap2["chunk_index"],
-                               lambda *a_, **k: None, preempt=box, preempt_budget=1)
+            x0b = sess.denoise(
+                snap2, snap2["chunk_index"], lambda *a_, **k: None,
+                preempt=box, preempt_budget=1,
+                policy=demo_wasd.AdmissionPolicy(boundaries=(1, 2, 3),
+                                                 min_remaining=1))
         except ChunkPreempted as px:
             preempted = True
             info = rt2.rebase_chunk(reason=f"oracle cut {cut}")
