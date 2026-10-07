@@ -155,6 +155,84 @@ class AuthoritativeMsg:
     chunk_ms: float
 
 
+def intent_key(controls: dict):
+    """A comparable form of a control intent, so 'the same state again' is detectable.
+
+    Deliberately value-based rather than identity-based: holding W delivers the same
+    controls repeatedly, and those are not new directional decisions.
+    """
+    return tuple(sorted((k, round(float(v), 6)) for k, v in (controls or {}).items()))
+
+
+def semantic_control_changed(pending_controls: dict, inflight_events) -> bool:
+    """Does this input change what the running chunk MEANS?
+
+    §Latency-3B-C1. The first C0 shakedown preempted 31 of 32 chunks because the
+    mailbox kept handing over the same held state and every arrival was treated as a
+    fresh decision. Repeatedly re-deriving 'still turning left' is not a reason to
+    discard a running chunk; changing from 'turning left' to 'turning left and moving'
+    is.
+    """
+    if not inflight_events:
+        return True          # nothing bound yet, so any input changes the meaning
+    last = getattr(inflight_events[-1], "controls", None)
+    return intent_key(pending_controls) != intent_key(last or {})
+
+
+class AdmissionPolicy:
+    """Decides whether an arriving input is worth interrupting a running chunk for.
+
+    Deterministic on purpose. A prediction of "how much would this save" would need a
+    model of chunk phase and input arrival, and at this stage a wrong prediction is
+    worse than a conservative rule, because it would silently reintroduce the
+    pathology it is meant to remove.
+
+        admit iff
+            forward_index is an allowed boundary
+            AND remaining forwards >= MIN_REMAINING
+            AND budget remains
+            AND the control intent actually changed
+
+    The defaults are the conservative first cut: only after forward 1, where C0 found
+    27 of its 31 preemptions, so the boundary set that matters most is exercised first.
+
+    Every rejection reason is counted separately. C0 lost a real bug behind a single
+    conflated counter, and that mistake is not worth repeating.
+    """
+
+    def __init__(self, boundaries=(1,), min_remaining=2):
+        self.boundaries = tuple(int(b) for b in boundaries)
+        self.min_remaining = int(min_remaining)
+        self.tally = dict(peeks_with_input=0, admitted=0,
+                          rejected_too_late=0, rejected_budget=0,
+                          rejected_same_state=0)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.boundaries)
+
+    def decide(self, controls, inflight_events, forward_index,
+               remaining_forwards, budget):
+        self.tally["peeks_with_input"] += 1
+        if forward_index not in self.boundaries \
+                or remaining_forwards < self.min_remaining:
+            self.tally["rejected_too_late"] += 1
+            return False, "too_late"
+        if budget <= 0:
+            self.tally["rejected_budget"] += 1
+            return False, "budget"
+        if not semantic_control_changed(controls, inflight_events):
+            self.tally["rejected_same_state"] += 1
+            return False, "same_state"
+        self.tally["admitted"] += 1
+        return True, "admitted"
+
+
+def _parse_boundaries(spec: str):
+    """'1' -> (1,), '1,2' -> (1, 2), '' -> () which disables preemption entirely."""
+    return tuple(int(x) for x in str(spec).split(",") if x.strip() != "")
+
+
 class ChunkPreempted(Exception):
     """Raised out of `denoise` when a preemption was taken at a forward boundary.
 
@@ -285,7 +363,8 @@ class Worker(threading.Thread):
                  frame_q: queue.Queue, stop_evt: threading.Event,
                  submit_q: Optional[queue.Queue] = None,
                  mailbox: Optional["InputMailbox"] = None,
-                 max_preemptions_per_chunk: int = 1):
+                 max_preemptions_per_chunk: int = 1,
+                 policy: Optional["AdmissionPolicy"] = None):
         super().__init__(name="gpu-worker", daemon=True)
         self.rt, self.session = rt, session
         self.input_q, self.frame_q = input_q, frame_q
@@ -298,6 +377,10 @@ class Worker(threading.Thread):
         # §Latency-3B-B2: detection-only mailbox, and the frozen liveness bound
         self.mailbox = mailbox if mailbox is not None else InputMailbox()
         self.max_preemptions_per_chunk = max_preemptions_per_chunk
+        # §Latency-3B-C1: the admission policy owns the "is it worth it" decision and
+        # every rejection reason. Passing boundaries=() disables preemption entirely,
+        # which is the A arm of the eventual A/B.
+        self.policy = policy if policy is not None else AdmissionPolicy()
         self.preemption_trace: list = []
         self.stop = stop_evt
         self.invariants = {
@@ -415,7 +498,8 @@ class Worker(threading.Thread):
                 try:
                     x0 = self.session.denoise(
                         snap, chunk_index, emit_preview,
-                        preempt=self.mailbox, preempt_budget=budget)
+                        preempt=self.mailbox, preempt_budget=budget,
+                        policy=self.policy)
                     break
                 except ChunkPreempted as px:
                     budget -= 1
@@ -694,7 +778,8 @@ class WanSession:
                                w=self.lat_w).to(self.pdt)
 
     # -- the two phases, so the worker can place commit() between them ----
-    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0):
+    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0,
+                policy=None):
         """One chunk. Raises ChunkPreempted if a rebase is taken at a forward boundary.
 
         `preempt_budget` is the number of preemptions still permitted for THIS chunk.
@@ -789,13 +874,23 @@ class WanSession:
             # The peek is a short lock on a CPU flag. When the budget is 0 -- the
             # normal path -- this branch is not even entered, so an uninterrupted run
             # never synchronises for preemption and its throughput is untouched.
-            if preempt is not None and preempt_budget > 0:
-                if preempt.peek() is not None:
-                    # the ONLY synchronise on this path, and only because a decision
-                    # to abandon the attempt has already been made
-                    torch.cuda.synchronize()
-                    req = preempt.take()
-                    raise ChunkPreempted(req, forward_index=ti + 1)
+            if preempt is not None and policy is not None and policy.enabled:
+                req = preempt.peek()
+                if req is not None:
+                    n_forwards = len(self.timesteps) + 1
+                    remaining = n_forwards - (ti + 1)
+                    admit, why = policy.decide(
+                        req[1], snap.get("events", ()), forward_index=ti + 1,
+                        remaining_forwards=remaining, budget=preempt_budget)
+                    if admit:
+                        # the ONLY synchronise on this path, and only because the
+                        # decision to abandon the attempt has already been made
+                        torch.cuda.synchronize()
+                        preempt.take()
+                        raise ChunkPreempted(req, forward_index=ti + 1)
+                    # rejected: leave the input in the mailbox for the next chunk, and
+                    # do NOT synchronise. A rejected candidate must cost a lock read
+                    # and nothing else.
         # the KV write: the last state-mutating step of the chunk
         with torch.amp.autocast("cuda", dtype=self.pdt), torch.no_grad():
             pipe.model(x=[x0], t=torch.stack([self.timesteps[-1] * 0.0]).to(self.dev),
@@ -857,7 +952,8 @@ class MockSession:
         img = np.clip(img * np.array(tint, dtype=np.float32), 0, 1)
         return (img * 255.0).round().astype(np.uint8)
 
-    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0):
+    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0,
+                policy=None):
         time.sleep(self.step_ms / 1000.0 * (1.0 - self.preview_frac))
         pose = snap["candidate_camera"].pose
         t0s = [self.rt.record(e).t0_accept_ns for e in snap["applied_event_ids"]]
@@ -1333,7 +1429,10 @@ def run_mock_smoke(args) -> int:
     submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
     worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q,
-                    mailbox=input_q)
+                    mailbox=input_q,
+                    policy=AdmissionPolicy(
+                        boundaries=_parse_boundaries(args.preempt_boundaries),
+                        min_remaining=args.preempt_min_remaining))
     worker.start()
 
     viewer = Viewer(args, input_q, frame_q, stop, HUD_TITLE_FALLBACK, args.pixel,
@@ -1502,6 +1601,13 @@ def build_args(argv=None):
     ap.add_argument("--input_period_ms", type=float, default=200.0,
                     help="shakedown input rate. 200 ms against a ~600 ms chunk means "
                          "most chunks see an intent mid-flight")
+    ap.add_argument("--preempt_boundaries", default="1",
+                    help="§Latency-3B-C1. Comma-separated forward boundaries where a "
+                         "preemption may be admitted. '1' is the conservative first "
+                         "cut. '' disables preemption entirely (the eventual A arm).")
+    ap.add_argument("--preempt_min_remaining", type=int, default=2,
+                    help="require at least this many forwards still to run, so a "
+                         "boundary with nothing left to save is rejected as too_late")
     ap.add_argument("--min_preemptions", type=int, default=1,
                     help="shakedown gate: at least this many preemptions must occur, "
                          "otherwise the mechanism was never actually exercised")
@@ -1614,7 +1720,10 @@ def main():
     submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
     worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q,
-                    mailbox=input_q)
+                    mailbox=input_q,
+                    policy=AdmissionPolicy(
+                        boundaries=_parse_boundaries(args.preempt_boundaries),
+                        min_remaining=args.preempt_min_remaining))
     worker.start()
 
     viewer = Viewer(args, input_q, frame_q, stop, title, args.pixel,
@@ -1839,6 +1948,22 @@ def main():
         g("the post-rebase attempt committed (fallback path works)",
           len(rt.committed_chunks()) > n_pre,
           f"{len(rt.committed_chunks())} chunks from {n_pre} preemptions")
+
+        t = worker.policy.tally
+        g("the admission policy actually rejected things (else it is a no-op)",
+          (t["rejected_same_state"] + t["rejected_too_late"]
+           + t["rejected_budget"]) > 0 or not worker.policy.enabled,
+          f"peeks_with_input={t['peeks_with_input']}")
+
+        print()
+        print("    ADMISSION POLICY TALLY (§Latency-3B-C1) — reasons kept separate")
+        print(f"      boundaries allowed       {worker.policy.boundaries} "
+              f"(min remaining forwards {worker.policy.min_remaining})")
+        print(f"      peeks that found input   {t['peeks_with_input']}")
+        print(f"      admitted                 {t['admitted']}")
+        print(f"      rejected_same_state      {t['rejected_same_state']}")
+        print(f"      rejected_too_late        {t['rejected_too_late']}")
+        print(f"      rejected_budget          {t['rejected_budget']}")
 
         print()
         print("    RECORDED, not a performance conclusion:")

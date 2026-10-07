@@ -272,7 +272,8 @@ def p9_the_one_preemption_bound_guarantees_progress():
             super().__init__(*a, **k)
             self.attempts = 0
 
-        def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0):
+        def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0,
+                    policy=None):
             self.attempts += 1
             if preempt is not None and preempt_budget > 0:
                 # simulate "an input is always pending"
