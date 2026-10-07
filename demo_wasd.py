@@ -68,6 +68,7 @@ import statistics
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
@@ -154,6 +155,75 @@ class AuthoritativeMsg:
     chunk_ms: float
 
 
+class ChunkPreempted(Exception):
+    """Raised out of `denoise` when a preemption was taken at a forward boundary.
+
+    An exception rather than a sentinel return, because the attempt is genuinely
+    abandoned: the caller must not commit, must not decode, and must not treat any
+    partial result as a chunk. Making that impossible to ignore is the point.
+    """
+
+    def __init__(self, request, forward_index: int):
+        super().__init__(f"preempted after forward {forward_index}")
+        self.request = request
+        self.forward_index = forward_index
+
+
+class InputMailbox:
+    """The session's input queue: one FIFO that can be both drained and peeked.
+
+    §Latency-3B-B2 needs two access patterns on the same bytes -- the worker drains it
+    to `accept()`, and the generation loop peeks at a forward boundary to decide
+    whether to preempt -- and the first version of this used two structures, which
+    meant a trigger could be accepted twice. One object makes that structural rather
+    than a discipline.
+
+    The peek is a short CPU lock and nothing else. That is the discipline that keeps
+    preemption from taxing every chunk: an uninterrupted run never enters the
+    detection branch, so it never synchronises for preemption.
+
+    The first observed time is kept as posted and never recomputed, because "when did
+    the user actually press" must not move forward while the runtime is busy.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._items = deque()
+
+    # -- the authoritative drain path -------------------------------------
+    def get_nowait(self):
+        with self._lock:
+            if not self._items:
+                raise queue.Empty
+            return self._items.popleft()
+
+    # -- the detection path ----------------------------------------------
+    def peek(self):
+        with self._lock:
+            return self._items[0] if self._items else None
+
+    def take(self):
+        with self._lock:
+            return self._items.popleft() if self._items else None
+
+    # -- producer side ----------------------------------------------------
+    def post(self, controls: dict, t_observed_ns: int):
+        with self._lock:
+            self._items.append((int(t_observed_ns), dict(controls)))
+
+    def put(self, item):                      # queue.Queue-compatible
+        t0, controls = item
+        self.post(controls, t0)
+
+    def qsize(self):
+        with self._lock:
+            return len(self._items)
+
+    def empty(self):
+        with self._lock:
+            return not self._items
+
+
 @dataclass
 class WorkerDone:
     """Sentinel. reason=None means a clean stop; otherwise it is a failure."""
@@ -213,7 +283,9 @@ class Worker(threading.Thread):
 
     def __init__(self, rt: InteractiveRuntime, session, input_q: queue.Queue,
                  frame_q: queue.Queue, stop_evt: threading.Event,
-                 submit_q: Optional[queue.Queue] = None):
+                 submit_q: Optional[queue.Queue] = None,
+                 mailbox: Optional["InputMailbox"] = None,
+                 max_preemptions_per_chunk: int = 1):
         super().__init__(name="gpu-worker", daemon=True)
         self.rt, self.session = rt, session
         self.input_q, self.frame_q = input_q, frame_q
@@ -223,6 +295,10 @@ class Worker(threading.Thread):
         # describes -- the timestamp is authoritative, its arrival is not.
         self.submit_q = submit_q if submit_q is not None else queue.Queue()
         self._metas: dict = {}
+        # §Latency-3B-B2: detection-only mailbox, and the frozen liveness bound
+        self.mailbox = mailbox if mailbox is not None else InputMailbox()
+        self.max_preemptions_per_chunk = max_preemptions_per_chunk
+        self.preemption_trace: list = []
         self.stop = stop_evt
         self.invariants = {
             "previews_emitted": 0,
@@ -234,6 +310,7 @@ class Worker(threading.Thread):
             "t4_recorded": 0,
             "t4_already_set": 0,
             "t4_unknown_frame": 0,
+            "preemptions": 0,
         }
         self.error: Optional[str] = None
 
@@ -305,21 +382,62 @@ class Worker(threading.Thread):
             snap = rt.begin_chunk()
             chunk_index = snap["chunk_index"]
 
-            def emit_preview(frame, model_ms):
-                # A preview is a read-only projection of an in-flight chunk and
-                # must be structurally incapable of advancing committed state.
-                committed = rt.committed.chunk_index
-                if committed != chunk_index - 1:
-                    self.invariants["preview_commit_violations"] += 1
-                self.invariants["previews_emitted"] += 1
-                self.frame_q.put(PreviewMsg(
-                    frame=frame, chunk_index=chunk_index,
-                    generation_id=snap["generation_id"],
-                    event_ids=snap["applied_event_ids"], model_ms=model_ms,
-                    committed_at_emit=committed))
+            # ---- §Latency-3B-B2: single-rebase preemption -----------------------
+            # budget starts at 1 and is spent by the first rebase, so a chunk can
+            # never be restarted more than once. That bound is what makes progress
+            # guaranteed: without it, sustained input could cancel every attempt and
+            # the run would produce no frames at all, which is worse than waiting.
+            budget = self.max_preemptions_per_chunk
+            while True:
+                def emit_preview(frame, model_ms):
+                    # A preview is a read-only projection of an in-flight chunk and
+                    # must be structurally incapable of advancing committed state.
+                    committed = rt.committed.chunk_index
+                    if committed != chunk_index - 1:
+                        self.invariants["preview_commit_violations"] += 1
+                    self.invariants["previews_emitted"] += 1
+                    self.frame_q.put(PreviewMsg(
+                        frame=frame, chunk_index=chunk_index,
+                        generation_id=snap["generation_id"],
+                        event_ids=snap["applied_event_ids"], model_ms=model_ms,
+                        committed_at_emit=committed))
 
-            t_chunk = time.perf_counter_ns()
-            x0 = self.session.denoise(snap, chunk_index, emit_preview)
+                t_chunk = time.perf_counter_ns()
+                try:
+                    x0 = self.session.denoise(
+                        snap, chunk_index, emit_preview,
+                        preempt=self.mailbox, preempt_budget=budget)
+                    break
+                except ChunkPreempted as px:
+                    budget -= 1
+                    # order matters and is the whole of C6: cancel BEFORE accept, so
+                    # the triggering input's claim is taken against a frontier with no
+                    # chunk in flight and therefore names THIS chunk. Accepting first
+                    # would claim chunk N+1 and the replay would gain nothing.
+                    t_rebase = time.perf_counter_ns()
+                    info = rt.rebase_chunk(
+                        reason=f"preempted after forward {px.forward_index}")
+                    # the mailbox stores (t_observed_ns, controls), the same shape the
+                    # drain path yields. Unpacked in that order.
+                    t_obs, controls = px.request
+                    t_admit = time.perf_counter_ns()
+                    rt.accept(controls, _now_ns=t_obs)
+                    self.session.restore_chunk_rng()
+                    self.invariants["preemptions"] += 1
+                    self.preemption_trace.append(dict(
+                        chunk_index=chunk_index,
+                        forward=px.forward_index,
+                        from_generation=info["from_generation"],
+                        to_generation=info["to_generation"],
+                        t_observed_ns=t_obs,
+                        # timing only, NOT an authority: `t0` keeps the physical input
+                        # time and is not redefined. This measures how much the
+                        # preemption machinery itself cost, which would otherwise be
+                        # invisible because t0 is deliberately backdated to the press.
+                        t_admitted_ns=t_admit,
+                        observed_to_admitted_ms=(t_admit - t_obs) / 1e6,
+                        rebase_cost_ms=(t_admit - t_rebase) / 1e6))
+                    snap = rt.begin_chunk()
 
             # t2 BEFORE the decode. The generation state became authoritative the
             # moment the last state-mutating step completed; the decode is a
@@ -567,7 +685,13 @@ class WanSession:
                                w=self.lat_w).to(self.pdt)
 
     # -- the two phases, so the worker can place commit() between them ----
-    def denoise(self, snap, cid, emit_preview):
+    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0):
+        """One chunk. Raises ChunkPreempted if a rebase is taken at a forward boundary.
+
+        `preempt_budget` is the number of preemptions still permitted for THIS chunk.
+        At 0 no detection happens at all, which is the normal path and therefore the
+        one that must stay free of synchronisation.
+        """
         torch = self.torch
         pipe = self.pipe
 
@@ -642,6 +766,27 @@ class WanSession:
                 model_ms = ((time.perf_counter_ns() - min(t0s)) / 1e6
                             if t0s else None)
                 emit_preview(frame, model_ms)
+
+            # ---- §Latency-3B-B2: preemption detection at a forward boundary ----
+            # Every denoise forward is a detection boundary: after forward 1, 2 and 3.
+            #
+            # After forward 3 only the clean-x0 write remains, so a rebase there saves
+            # about a quarter of a chunk rather than most of one. It is kept anyway
+            # because the alternative is a silent hole in the trigger set, and the
+            # measured gain per boundary is reported rather than assumed. The genuinely
+            # too-late case -- after the write -- is not a boundary at all, and an input
+            # arriving then simply waits for the next chunk.
+            #
+            # The peek is a short lock on a CPU flag. When the budget is 0 -- the
+            # normal path -- this branch is not even entered, so an uninterrupted run
+            # never synchronises for preemption and its throughput is untouched.
+            if preempt is not None and preempt_budget > 0:
+                if preempt.peek() is not None:
+                    # the ONLY synchronise on this path, and only because a decision
+                    # to abandon the attempt has already been made
+                    torch.cuda.synchronize()
+                    req = preempt.take()
+                    raise ChunkPreempted(req, forward_index=ti + 1)
         # the KV write: the last state-mutating step of the chunk
         with torch.amp.autocast("cuda", dtype=self.pdt), torch.no_grad():
             pipe.model(x=[x0], t=torch.stack([self.timesteps[-1] * 0.0]).to(self.dev),
@@ -681,6 +826,11 @@ class MockSession:
         exists so the worker can call it unconditionally on both sessions."""
         return None
 
+    def restore_chunk_rng(self):
+        """C2's hook. The mock draws no noise, so there is no stream position to
+        restore; it exists so the worker can call it unconditionally."""
+        return None
+
     def _glyph(self, pose, tint):
         p = (np.asarray(pose, dtype=np.float64).ravel()
              if pose is not None else np.zeros(16))
@@ -698,7 +848,7 @@ class MockSession:
         img = np.clip(img * np.array(tint, dtype=np.float32), 0, 1)
         return (img * 255.0).round().astype(np.uint8)
 
-    def denoise(self, snap, cid, emit_preview):
+    def denoise(self, snap, cid, emit_preview, preempt=None, preempt_budget=0):
         time.sleep(self.step_ms / 1000.0 * (1.0 - self.preview_frac))
         pose = snap["candidate_camera"].pose
         t0s = [self.rt.record(e).t0_accept_ns for e in snap["applied_event_ids"]]
@@ -1140,11 +1290,12 @@ def run_mock_smoke(args) -> int:
     session = MockSession(h=304, w=528, step_ms=args.mock_step_ms)
     session.attach_runtime(rt)
 
-    input_q: queue.Queue = queue.Queue()
+    input_q = InputMailbox()
     frame_q: queue.Queue = queue.Queue()
     submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
-    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q)
+    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q,
+                    mailbox=input_q)
     worker.start()
 
     viewer = Viewer(args, input_q, frame_q, stop, HUD_TITLE_FALLBACK, args.pixel,
@@ -1422,11 +1573,12 @@ def main():
     session = WanSession(args)
     session.attach_runtime(rt)
 
-    input_q: queue.Queue = queue.Queue()
+    input_q = InputMailbox()
     frame_q: queue.Queue = queue.Queue()
     submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
-    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q)
+    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q,
+                    mailbox=input_q)
     worker.start()
 
     viewer = Viewer(args, input_q, frame_q, stop, title, args.pixel,

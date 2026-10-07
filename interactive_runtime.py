@@ -346,6 +346,10 @@ class InteractiveRuntime:
         self._rejected: list[tuple[InputEvent, str]] = []
         # §Latency-1C: per-chunk public record, appended only in commit()
         self._chunk_log: list[CommittedChunk] = []
+        # §Latency-3B-B2: explicit rebind bookkeeping. Kept out of
+        # LatencyTraceRecord so the 1B schema is not migrated for a transition counter.
+        self._rebinds: dict[int, int] = {}
+        self._rebases: list[dict] = []
 
     # ------------------------------------------------------------- frontier
     def _next_free_chunk(self) -> int:
@@ -728,6 +732,74 @@ class InteractiveRuntime:
             if r.t3_first_real_ns is None:
                 r.t3_first_real_ns = t3
                 r.first_real_frame_id = meta.frame_id
+
+    def rebase_chunk(self, reason: str = "") -> dict:
+        """§Latency-3B-B2. Logically cancel the in-flight attempt and open a NEW
+        generation for the SAME chunk_index, carrying the same batch forward.
+
+        WHAT THIS IS NOT: it is not a kernel kill. Python cannot interrupt a launched
+        CUDA kernel. The caller must only invoke this at a forward boundary, after
+        synchronising, so no work for the discarded attempt is still on the stream.
+
+        WHY IT MUST TOUCH THE CLAIMS, and why that is a deliberate exception rather
+        than a relaxation:
+
+        `begin_chunk` partitions the queue by `claim.key() == (generation_id,
+        chunk_index)`. Bumping the generation without re-claiming would make the batch's
+        existing claims compare LESS than the new frontier, so they would be classified
+        stale and dropped -- which is precisely what a rebase must not do. The claim
+        therefore has to move with the generation.
+
+        The invariant is restated rather than abandoned:
+
+            accept()   binds a claim exactly once
+            rebase()   rebinds it exactly once, explicitly, and is recorded
+            nothing else ever rebinds
+
+        `t1` is NOT rewritten (§Latency-3B-B1 / C3): t1 is when the input was first
+        assigned, and that does not change because the chunk was attempted twice.
+        """
+        if self._inflight is None:
+            raise RuntimeStateError("rebase_chunk without an in-flight chunk")
+        snap = self._inflight
+        events = list(snap["events"])
+        stale_note = reason or "preempted at a forward boundary"
+
+        for eid in snap["applied_event_ids"]:
+            r = self._records[eid]
+            if r.is_terminal():
+                raise RuntimeStateError(
+                    f"cannot rebase event {eid}: it is already terminal "
+                    f"({r.terminal_status})")
+            self._rebinds[eid] = self._rebinds.get(eid, 0) + 1
+            # back into the pending pool: NOT terminal, NOT aborted. The input's
+            # intent survives; only the attempt is discarded.
+            r.terminal_status = PENDING
+            r.note = f"{stale_note} (rebind {self._rebinds[eid]})"
+
+        self._inflight = None
+        # a FRESH generation for the new attempt, at the SAME chunk_index, so any
+        # artefact of the discarded attempt fails a generation check rather than
+        # silently matching
+        self.committed.generation_id += 1
+        target = self.committed.chunk_index + 1
+        claim = ApplicationClaim(generation_id=self.committed.generation_id,
+                                 target_chunk_index=target)
+        for ev in events:
+            self._queue.append(QueuedInput(event=ev, claim=claim))
+        self._rebases.append(dict(chunk_index=snap["chunk_index"],
+                                  from_generation=snap["generation_id"],
+                                  to_generation=self.committed.generation_id,
+                                  event_ids=tuple(snap["applied_event_ids"]),
+                                  reason=stale_note))
+        return self._rebases[-1]
+
+    def rebase_count(self, event_id: int) -> int:
+        """How many times this input has been carried across a rebase."""
+        return self._rebinds.get(event_id, 0)
+
+    def rebases(self) -> list:
+        return list(self._rebases)
 
     def mark_renderer_submit(self, meta: FrameMeta,
                              _now_ns: Optional[int] = None) -> None:
