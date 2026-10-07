@@ -1,8 +1,11 @@
 # §Latency-1D — Renderer Submit Authority Contract
 
-    STATUS   CONTRACT FROZEN. No timer has been added yet; this document exists so that
-             the definitions are fixed BEFORE code, because a timer written first tends
-             to turn "a convenient moment to read a clock" into the de-facto authority.
+    STATUS   CLOSED at cc350d0. The contract was frozen first and the timer written
+             after, on purpose: a timer written first tends to turn "a convenient moment
+             to read a clock" into the de-facto authority. The stage gate is at the end
+             of this document.
+    t4       MEASURED, windowed only, lineage-bound, write-once
+    t5       still NOT MEASURABLE, and deliberately not defined here
 
 ## 0. Scope
 
@@ -217,3 +220,46 @@ Closing 1D does **not** require solving physical-present measurement.
 > §Latency-1D measures when an authoritative real frame first enters the real
 > window/display pipeline; it does not claim to know when the user's physical display has
 > actually presented that frame.
+
+## 9. Stage gate, run at the exact head
+
+Run at `cc350d0`, the code head, with the head asserted first so the result cannot describe
+a different tree than the one being closed:
+
+    head pinned to cc350d0                          PASS
+    tracked tree clean, git diff --check             PASS
+    unit suite                                      PASS   85/85
+    headless mock  (T3)                             PASS   13/13
+    windowed mock  (T1/T2/T5/T6)                    PASS   18/18
+    frozen code vs rtx5060-interactive-rc1           identical for wan/, play.py, run.sh,
+        run.ps1, setup.sh, setup.ps1, release_check.py, control_reduce.py,
+        preview_trace.py, chunk_phase.py
+    rtx5060-interactive-rc1 -> 1c3053d               PASS   unmoved
+    release_check.py --smoke --chunks 4              PASS   11/11, including the GPU path
+
+## 10. Measured, on the real GPU with a real window
+
+12 randomized-phase events, 49 chunks, `--blend_ms 50`, display driver `x11`:
+
+    keypress -> renderer submit    n=12  p50  815 ms  p90 1107  min 586  max 1166
+    real decode -> submit          n=12  p50   19 ms  p90   23  min  10  max   25
+
+    t4 stamped 48   write-once refusals 0   unknown frames 0
+    blend-complete submits 47, kept separate from t4 by D2
+    t5 present UNAVAILABLE, input -> present NOT MEASURED
+
+**19 ms from decode to submit is about one UI frame at 60 fps**, which is what "first draw"
+should cost, and it is a sanity check that the timestamp is attached where the contract
+says rather than somewhere convenient. The same run measured keypress -> first affected
+real frame at p50 792 ms, and 792 + 19 = 811 against the measured 815 ms submit figure,
+which agrees to within a measurement frame.
+
+Zero write-once refusals across 48 submissions means no redraw ever tried to overwrite a t4,
+which is the failure this stage's `first_real_submit is write-once` rule exists to catch.
+
+## 11. Nothing new is claimed about t5
+
+`t5_presented_ns` remains `None` everywhere, `accept_to_present_ms` remains `None`, and
+`input -> present` and `control-to-real-display` remain **NOT MEASURED**. Closing this stage
+does not require solving physical present, and it does not get to call the display submit a
+present by another name.
