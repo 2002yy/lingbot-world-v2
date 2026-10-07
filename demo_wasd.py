@@ -310,6 +310,8 @@ class Worker(threading.Thread):
             "t4_recorded": 0,
             "t4_already_set": 0,
             "t4_unknown_frame": 0,
+            "t4_refused": 0,
+            "t4_refusal_reason": "",
             "preemptions": 0,
         }
         self.error: Optional[str] = None
@@ -330,8 +332,15 @@ class Worker(threading.Thread):
             try:
                 self.rt.mark_renderer_submit(meta, _now_ns=t4_ns)
                 self.invariants["t4_recorded"] += 1
-            except RuntimeStateError:
-                self.invariants["t4_already_set"] += 1
+            except RuntimeStateError as e:
+                # distinguish the reasons: "write-once" is a legitimate redraw
+                # rejection, anything else is a real refusal and must not be hidden
+                # behind a single counter. C0 found this the hard way.
+                if "write-once" in str(e):
+                    self.invariants["t4_already_set"] += 1
+                else:
+                    self.invariants["t4_refused"] += 1
+                    self.invariants["t4_refusal_reason"] = str(e)[:160]
             self._metas.pop(frame_id, None)
             if len(self._metas) > 8:                    # bounded
                 for k in sorted(self._metas)[:-8]:
@@ -924,6 +933,8 @@ class Viewer:
                                 float(self.UI_FPS), args.record_fps)
         self._seq_idx = 0
         self._seq_t0: Optional[float] = None
+        self._shake_next: Optional[float] = None
+        self._shake_i = 0
 
         # ---- §Latency-1D: t4 is taken HERE, at the submit -------------------
         # `pygame.display.get_driver()` is read rather than trusting --headless, because
@@ -1007,6 +1018,31 @@ class Viewer:
                 # keypress goes through, so the input path is the real one and
                 # only the source of the press is automated.
                 self.pygame.event.post(ev)
+
+    def _run_shakedown(self, now_s: float):
+        """§Latency-3B-C0 sustained input: one discrete intent every period.
+
+        Sustained on purpose. A sparse script barely ever lands an intent inside a
+        running chunk, so preemption would never be exercised and the shakedown would
+        pass while proving nothing. Cycling single keys means each intent is exactly
+        one measurement, and releasing first makes the held set match a real hand.
+        """
+        pygame = self.pygame
+        table = {"W": pygame.K_w, "A": pygame.K_a,
+                 "S": pygame.K_s, "D": pygame.K_d}
+        cycle = ["W", "D", "S", "A"]
+        period = max(0.01, self.args.input_period_ms / 1000.0)
+        if self._shake_next is None:
+            self._shake_next = 0.0
+        while now_s >= self._shake_next:
+            self._shake_next += period
+            name = cycle[self._shake_i % len(cycle)]
+            self._shake_i += 1
+            for k in sorted(self.held_keys):
+                pygame.event.post(pygame.event.Event(
+                    pygame.KEYUP, key=table[k], mod=0, unicode="", scancode=0))
+            pygame.event.post(pygame.event.Event(
+                pygame.KEYDOWN, key=table[name], mod=0, unicode="", scancode=0))
 
     def _run_phase(self, now_s: float):
         """Fire the next characterization event when its randomized time arrives.
@@ -1223,7 +1259,9 @@ class Viewer:
                       f"arrived, so nothing could be verified")
                 break
 
-            if self._phase_plan is not None and self._ready:
+            if self.args.shakedown and self._ready:
+                self._run_shakedown(now - self._seq_t0)
+            elif self._phase_plan is not None and self._ready:
                 self._run_phase(now - self._seq_t0)
             elif self.args.script and self._ready:
                 self._run_script(now - self._seq_t0)
@@ -1456,68 +1494,66 @@ def build_args(argv=None):
     ap.add_argument("--phase_lo", type=float, default=1.2)
     ap.add_argument("--phase_hi", type=float, default=2.6)
     ap.add_argument("--phase_settle", type=float, default=5.0)
+    ap.add_argument("--shakedown", action="store_true",
+                    help="§Latency-3B-C0. Sustained camera input at --input_period_ms "
+                         "so intents actually land inside a running chunk, with "
+                         "preemption on. Reports BEHAVIOURAL gates only; it makes no "
+                         "claim about latency gain, because that is 3B-C.")
+    ap.add_argument("--input_period_ms", type=float, default=200.0,
+                    help="shakedown input rate. 200 ms against a ~600 ms chunk means "
+                         "most chunks see an intent mid-flight")
+    ap.add_argument("--min_preemptions", type=int, default=1,
+                    help="shakedown gate: at least this many preemptions must occur, "
+                         "otherwise the mechanism was never actually exercised")
     ap.add_argument("--mock_step_ms", type=float, default=90.0)
     ap.add_argument("--out_json", default=None)
     return ap.parse_args(argv)
 
 
 def device_probe():
-    """Name, total and free memory, from nvidia-smi, WITHOUT importing torch.
+    """Device facts, from nvidia-smi, WITHOUT importing torch.
 
-    This has to be separate from and earlier than anything that touches
-    torch.cuda. Creating torch's CUDA context shrinks the device by about 0.9 GiB,
-    after which torch.cuda.mem_get_info() reports roughly 6.87 GiB free in both the
-    healthy case and the retained-VRAM case, so it cannot tell them apart. The
-    device-level reading separates them cleanly: 7.70 GiB healthy against 0.90 GiB
-    when a finished run's memory has not been reclaimed.
+    Delegates to the fixed cleanliness contract so that there is exactly ONE place
+    where a threshold lives and it cannot be negotiated down per run. See
+    gpu_cleanliness.py for why the unattributed delta, not the free-memory figure, is
+    the number that gates.
 
-    Returns None when nvidia-smi is unavailable, in which case the caller falls
-    back to torch and says so.
+    Returns None when nvidia-smi is unavailable, in which case the caller says so
+    rather than substituting torch, whose own context makes the two states
+    indistinguishable.
     """
-    import subprocess
     try:
-        out = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=name,memory.free,memory.total,memory.used",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=30, check=True).stdout.strip()
-        name, free_mib, total_mib, used_mib = (x.strip() for x in out.split(","))
-        return dict(name=name, free=int(free_mib), total=int(total_mib),
-                    used=int(used_mib))
+        import gpu_cleanliness
     except Exception:
         return None
+    s = gpu_cleanliness.sample()
+    return s if s.get("ok") else None
 
 
 def preflight_gpu(args, dev) -> None:
-    """Refuse to start when the GPU still holds a previous run's memory.
+    """Refuse to start when the device is not clean, against thresholds fixed in code.
 
-    Called before torch is imported, so that the numbers are device-level and the
-    abort happens before any CUDA context exists. A run in that state otherwise
-    dies inside a forward pass with a CUDA OOM that says nothing about the cause.
+    THE THRESHOLDS ARE NOT TUNABLE HERE, ON PURPOSE. While bringing up §Latency-3B the
+    free-memory gate was lowered three times (7200 -> 6000 -> 4500 MiB) to make an
+    experiment fit, which is how an A arm ends up measured under 1.5 GiB of ghost
+    occupancy and a B arm under 3 GiB, with allocator pressure, clock state and OOM
+    headroom differing in a way that invites misreading as the effect under test.
     """
     if dev is None:
         print("  gpu memory  : preflight SKIPPED (nvidia-smi unavailable); if this "
               "run dies in prewarm with a CUDA OOM, VRAM from a previous run has "
               "probably not been released yet -- wait, or  wsl --shutdown")
         return
-    gib = 1024.0                       # nvidia-smi already reports MiB
-    free_mib, total_mib = dev["free"], dev["total"]
-    # healthy baseline measured on this machine is 7884 MiB free; the observed bad
-    # state was 919 MiB. The stack's own peak is ~7104 MiB (bf16) / ~5846 MiB (fp8),
-    # so this floor is derived from measurements rather than guessed.
-    floor_mib = 6500 if args.weight == "bf16" else 5800
-    warn_mib = 7500 if args.weight == "bf16" else 6800
-    print(f"  gpu memory  : {free_mib/gib:.2f} GiB free of {total_mib/gib:.2f} GiB "
-          f"({args.weight} floor {floor_mib/gib:.2f} GiB, device-level, pre-torch)")
-    if free_mib < floor_mib:
-        print(f"  ABORT: only {free_mib/gib:.2f} GiB free, below the "
-              f"{floor_mib/gib:.2f} GiB floor for {args.weight} at {args.pixel}.")
-        print("         A previously finished run has not released its VRAM yet.")
-        print("         Wait a minute, or reset the VM from Windows:  wsl --shutdown")
+    import gpu_cleanliness as gc
+    clean, reasons, s = gc.verdict(dev)
+    print(f"  gpu         : {gc.describe(s)}")
+    if not clean:
+        print("  ABORT: the device is not clean, and the floors are fixed:")
+        for r in reasons:
+            print(f"           - {r}")
+        print("           Wait for the driver to reclaim it, or reset the VM from")
+        print("           Windows:  wsl --shutdown. Do NOT lower the thresholds.")
         sys.exit(2)
-    if free_mib < warn_mib:
-        print(f"  WARNING: below the {warn_mib/gib:.2f} GiB this stack normally starts "
-              f"from; the run may OOM. Consider --weight fp8_lowmem.")
 
 
 def main():
@@ -1533,7 +1569,7 @@ def main():
 
     import torch
     if dev is not None:
-        title = f"{dev['name']} · {dev['total'] / 1024:.0f} GB"
+        title = f"{dev['name']} · {dev['total_mib'] / 1024:.0f} GB"
     else:
         name = (torch.cuda.get_device_name(0)
                 if torch.cuda.is_available() else "CPU (no CUDA)")
@@ -1733,6 +1769,96 @@ def main():
         print(f"  recorded {args.record}")
         print(f"    ffmpeg rc={rc}  frames written={n}  bytes={size}")
         print(f"    MP4 playable: {'PASS' if rc == 0 and size > 0 else 'FAIL'}")
+
+    # ---------------------------------------- §Latency-3B-C0 shakedown report
+    if args.shakedown:
+        pt = list(worker.preemption_trace)
+        n_pre = len(pt)
+        cuts = {}
+        per_chunk = {}
+        for r in pt:
+            cuts[r["forward"]] = cuts.get(r["forward"], 0) + 1
+            per_chunk[r["chunk_index"]] = per_chunk.get(r["chunk_index"], 0) + 1
+        non_committed_terminal = [r for r in recs
+                                  if r.is_terminal()
+                                  and r.terminal_status != "committed"]
+        seen = {}
+        for c in rt.committed_chunks():
+            for e in c.applied_event_ids:
+                seen[e] = seen.get(e, 0) + 1
+        duplicates = [e for e, k in seen.items() if k > 1]
+        # A leak is a committed chunk at a generation that was SUPERSEDED FOR THAT
+        # SAME CHUNK. Comparing generations globally is wrong: a later chunk's rebase
+        # legitimately reuses an earlier generation number, so the first version of
+        # this check flagged a chunk that had never been preempted at all.
+        superseded = {(r["chunk_index"], r["from_generation"]) for r in pt}
+        leaked = [c for c in rt.committed_chunks()
+                  if (c.chunk_index, c.generation_id) in superseded]
+        gap = (rt.committed.settled_input_index
+               - rt.committed.processed_input_index)
+
+        print()
+        print("  §Latency-3B-C0  shakedown — BEHAVIOURAL GATES ONLY")
+        print("    (no claim about latency gain here; that is 3B-C)")
+
+        def g(name, cond, detail=""):
+            print(f"    [{'PASS' if cond else 'FAIL'}] {name}"
+                  + (f"  {detail}" if detail else ""))
+
+        g("preemption actually fired (else nothing was exercised)",
+          n_pre >= args.min_preemptions, f"{n_pre} preemptions")
+        g("several chunks really committed",
+          len(rt.committed_chunks()) >= 3,
+          f"{len(rt.committed_chunks())} committed chunks, "
+          f"{len(committed)} committed inputs")
+        g("no chunk was restarted more than once",
+          all(v <= 1 for v in per_chunk.values()),
+          f"per-chunk {per_chunk}")
+        g("no event committed twice (exactly-once held under rebase)",
+          not duplicates, f"duplicates {duplicates}")
+        g("no stale generation leaked into a committed chunk",
+          not leaked, f"leaked {[c.chunk_index for c in leaked]}")
+        g("a preview still never advanced committed state",
+          inv["preview_commit_violations"] == 0,
+          f"{inv['preview_commit_violations']} violations")
+        g("every committed frame's t4 was actually recorded",
+          inv["t4_refused"] == 0,
+          f"{inv['t4_recorded']} recorded, {inv['t4_already_set']} redraw-rejections, "
+          f"{inv['t4_refused']} refused"
+          + (f" ({inv['t4_refusal_reason']})" if inv["t4_refused"] else ""))
+        g("processed/settled are explainable",
+          gap == len(non_committed_terminal),
+          f"processed={rt.committed.processed_input_index} "
+          f"settled={rt.committed.settled_input_index} gap={gap} "
+          f"non-committed terminal={len(non_committed_terminal)}")
+        g("frames kept coming (no starvation)",
+          stats["authoritative_shown"] > 1
+          and stats["intents_sent"] > n_pre,
+          f"{stats['authoritative_shown']} authoritative frames shown, "
+          f"{stats['intents_sent']} intents sent")
+        g("the post-rebase attempt committed (fallback path works)",
+          len(rt.committed_chunks()) > n_pre,
+          f"{len(rt.committed_chunks())} chunks from {n_pre} preemptions")
+
+        print()
+        print("    RECORDED, not a performance conclusion:")
+        print(f"      cut point distribution   {dict(sorted(cuts.items()))} "
+              f"(after forward k)")
+        if pt:
+            oc = [r["observed_to_admitted_ms"] for r in pt]
+            rc = [r["rebase_cost_ms"] for r in pt]
+            print(f"      observed -> admitted     p50 {statistics.median(oc):.2f} ms"
+                  f"  max {max(oc):.2f} ms")
+            print(f"      rebase call cost         p50 {statistics.median(rc):.2f} ms"
+                  f"  max {max(rc):.2f} ms")
+        if lat:
+            print(f"      input -> first real      p50 {statistics.median(lat):.0f} ms")
+        t4v = [(r.t4_renderer_submit_ns - r.t0_accept_ns) / 1e6
+               for r in committed if r.t4_renderer_submit_ns is not None]
+        if t4v:
+            print(f"      input -> renderer submit p50 {statistics.median(t4v):.0f} ms")
+        print(f"      chunks generated         {inv['chunks']}")
+        print(f"      preemption rate          {n_pre}/{inv['chunks']} chunks")
 
     if args.out_json:
         with open(args.out_json, "w") as f:

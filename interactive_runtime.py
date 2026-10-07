@@ -830,14 +830,25 @@ class InteractiveRuntime:
             raise RuntimeStateError(
                 f"refusing t4 for a {meta.provenance!r} frame: prewarm and warmup "
                 f"frames never reach a display")
-        if meta.generation_id != self.committed.generation_id:
+        # §Latency-3B-B2 CORRECTION. This used to require
+        # `meta.generation_id == self.committed.generation_id`, which is right for
+        # mark_real_decoded (called synchronously, right after the commit) but wrong
+        # for t4: the submit timestamp arrives from the display thread and is drained
+        # later, and by then a preemption may have moved the generation on. Every t4
+        # but the newest frame then failed, which C0 measured as 32 refusals out of 32.
+        #
+        # The condition that actually matters is that THIS FRAME'S CHUNK REALLY
+        # COMMITTED, under the generation the frame claims. That is stricter than what
+        # it replaces in the way that counts -- it checks the historical record rather
+        # than the current cursor -- and it is what makes a discarded attempt's frame
+        # still un-markable, because a discarded attempt has no committed chunk.
+        c = self.committed_chunk(meta.chunk_index)
+        if c is None or c.generation_id != meta.generation_id:
             raise RuntimeStateError(
-                f"refusing t4: frame generation {meta.generation_id} != committed "
-                f"generation {self.committed.generation_id}")
-        if meta.chunk_index > self.committed.chunk_index:
-            raise RuntimeStateError(
-                f"refusing t4: chunk {meta.chunk_index} is not committed yet "
-                f"(committed is {self.committed.chunk_index})")
+                f"refusing t4: chunk {meta.chunk_index} at generation "
+                f"{meta.generation_id} is not in the committed log"
+                + (f" (that chunk committed at generation {c.generation_id})"
+                   if c is not None else " (that chunk never committed)"))
         for eid in meta.applied_event_ids:
             r = self._records.get(eid)
             if r is None:
