@@ -71,6 +71,80 @@ class InputEvent:
     kind: str
     controls: dict = field(default_factory=dict)
 
+    @property
+    def input_index(self) -> int:
+        """The strictly increasing position of this input in the session's stream.
+
+        DELIBERATELY NOT A SECOND STORED COUNTER. `_next_event_id` is assigned once
+        and only ever incremented; `reset` does not touch it. So over the whole
+        session `event_id` is already a strictly increasing input index, and a
+        second field would be a second authority for one fact -- the same hazard as
+        `delta_applied` and `_CAM_EPOCH`, both of which this codebase rejected on
+        purpose.
+
+        It becomes a stored counter, with a test that it strictly increases across
+        a reset, on the day `event_id` stops being monotone (for example if it
+        becomes a client-supplied UUID). Until then the two are equal by
+        construction, so the API surface can exist without the drift.
+        """
+        return self.event_id
+
+
+@dataclass(frozen=True)
+class CommittedChunk:
+    """The public record of one committed chunk: what it consumed, and what
+    watermark it established.
+
+    Appended inside `commit()`, so it cannot disagree with the records it
+    summarises. `processed_input_index` here is the HISTORICAL value as of this
+    chunk, which is what makes "does chunk 83 include my input?" answerable for a
+    chunk that finished long ago -- the current watermark would answer a different
+    question.
+    """
+    chunk_index: int
+    generation_id: int
+    applied_event_ids: tuple
+    processed_input_index: int
+    settled_input_index: int
+    t2_committed_ns: int
+
+    def includes(self, event_id: int) -> bool:
+        """The strict question, answered as strictly as it can be."""
+        return event_id in self.applied_event_ids
+
+    def consumed_up_to(self, input_index: int) -> bool:
+        """The coarse question. True means every input up to and including this one
+        is in a committed state, so this chunk's world already has it."""
+        return input_index <= self.processed_input_index
+
+
+@dataclass(frozen=True)
+class InputAcceptedAck:
+    """The runtime has taken responsibility for this input.
+
+    Says only one thing: it is queued, it has an identity, and it will not be
+    silently dropped. It does NOT say the model has consumed it.
+    """
+    event_id: int
+    input_index: int
+    t0_accepted_ns: int
+
+
+@dataclass(frozen=True)
+class InputProcessedAck:
+    """THIS INPUT IS IN A COMMITTED MODEL STATE.
+
+    Much stronger than acceptance, and it is emitted at exactly one point: t2, after
+    the containing chunk's commit has been validated. Never at queue insertion, and
+    never at assignment -- at assignment the GPU may not have consumed the input at
+    all, and the chunk that carries it can still be aborted.
+    """
+    event_id: int
+    input_index: int
+    chunk_index: int
+    generation_id: int
+    t2_committed_ns: int
+
 
 @dataclass(frozen=True)
 class FrameMeta:
@@ -80,6 +154,13 @@ class FrameMeta:
     generation_id: int
     applied_event_ids: tuple = ()
     provenance: str = "authoritative"     # authoritative | prewarm | warmup
+
+    # NOTE, and it is a real trap: a watermark field does NOT belong here. FrameMeta
+    # is created BEFORE commit (commit validates against it), so any watermark
+    # snapshotted at construction would carry the PREVIOUS chunk's value and would
+    # answer "does this frame include my input?" with a confident no. The exact
+    # answer is `event_id in meta.applied_event_ids`; the coarse per-frame answer is
+    # served by the runtime's per-chunk log instead. See committed_chunk().
 
 
 @dataclass(frozen=True)
@@ -232,6 +313,22 @@ class CommittedState:
     camera: CameraState = field(default_factory=CameraState)
     applied_event_ids: tuple = ()
 
+    # ---- §Latency-1C input watermarks, both derived from the records ----
+    # processed: every input_index <= it reached `committed`. This is the strong
+    #            "the model consumed it" statement.
+    # settled:   no input_index <= it is still pending or in_flight. Weaker: it says
+    #            the runtime is done with those inputs, but they may have been
+    #            aborted, rejected, gone stale or been reset away rather than
+    #            processed.
+    #
+    # They differ exactly when an input takes a non-committed terminal path, and then
+    # the gap is PERMANENT, because `processed` is a contiguous-prefix property and
+    # one aborted input stops it forever. Reporting only `processed` would make a
+    # healthy-looking deadline tag hide a dropped input; reporting only `settled`
+    # would let a client believe an aborted input was consumed.
+    processed_input_index: int = 0
+    settled_input_index: int = 0
+
 
 class InteractiveRuntime:
     """Minimal authoritative runtime. Unchanged contract, formal records."""
@@ -247,6 +344,8 @@ class InteractiveRuntime:
             camera=(camera.copy() if camera is not None else CameraState()))
         self._inflight: Optional[dict] = None
         self._rejected: list[tuple[InputEvent, str]] = []
+        # §Latency-1C: per-chunk public record, appended only in commit()
+        self._chunk_log: list[CommittedChunk] = []
 
     # ------------------------------------------------------------- frontier
     def _next_free_chunk(self) -> int:
@@ -265,6 +364,85 @@ class InteractiveRuntime:
     def frontier(self) -> tuple:
         """The application frontier the NEXT begin_chunk() will realise."""
         return (self.committed.generation_id, self.committed.chunk_index + 1)
+
+    # ------------------------------------------------- §Latency-1C watermarks
+    def _input_watermarks(self) -> tuple:
+        """(processed, settled), both computed from the records, never stored twice.
+
+        The contiguous-prefix property holds because an event's claim is taken from
+        `_next_free_chunk()` at accept time, which is monotone in accept order, and
+        `begin_chunk()` assigns every event whose claim equals the frontier. So a
+        lower-index input can never still be queued while a higher-index one has
+        committed.
+        """
+        processed = settled = 0
+        p_open = s_open = True
+        for r in self.records():                 # ordered by event_id
+            if p_open and r.terminal_status == COMMITTED:
+                processed = r.event_id
+            else:
+                p_open = False
+            if s_open and r.is_terminal():
+                settled = r.event_id
+            else:
+                s_open = False
+        return processed, settled
+
+    def _refresh_watermarks(self) -> None:
+        self.committed.processed_input_index, \
+            self.committed.settled_input_index = self._input_watermarks()
+
+    def committed_chunk(self, chunk_index: int) -> Optional["CommittedChunk"]:
+        """What chunk `chunk_index` consumed and what watermark it established."""
+        for c in self._chunk_log:
+            if c.chunk_index == chunk_index:
+                return c
+        return None
+
+    def committed_chunks(self) -> list:
+        return list(self._chunk_log)
+
+    def frame_lineage(self, meta: "FrameMeta") -> dict:
+        """Everything needed to decide whether a frame a client is holding already
+        contains a given input, without guessing from elapsed time.
+
+        `strict` is exact and always available. `coarse_upto` is the historical
+        watermark of the chunk this frame came from, and is None if that chunk is not
+        in the log (a prewarm or warmup frame, or a chunk that never committed).
+        """
+        c = self.committed_chunk(meta.chunk_index)
+        return {
+            "frame_id": meta.frame_id,
+            "frame_kind": meta.frame_kind,
+            "provenance": meta.provenance,
+            "chunk_index": meta.chunk_index,
+            "generation_id": meta.generation_id,
+            "strict": tuple(meta.applied_event_ids),
+            "coarse_upto": (c.processed_input_index if c is not None else None),
+        }
+
+    # ------------------------------------------------------- §Latency-1C acks
+    def accepted_ack(self, event_id: int) -> "InputAcceptedAck":
+        """Acceptance is a property of having a record at all: every accepted event
+        gets one before it is queued, so this cannot be missing."""
+        r = self.record(event_id)
+        return InputAcceptedAck(event_id=r.event_id, input_index=r.event_id,
+                                t0_accepted_ns=r.t0_accept_ns)
+
+    def processed_ack(self, event_id: int) -> "InputProcessedAck":
+        """Raise rather than return a placeholder unless the input really is in a
+        committed state. A caller must never be able to mistake "queued" or
+        "assigned" for "processed"."""
+        r = self.record(event_id)
+        if r.terminal_status != COMMITTED or r.t2_commit_ns is None:
+            raise RuntimeStateError(
+                f"event {event_id} is not processed: status is "
+                f"{r.terminal_status!r} (an InputProcessedAck requires t2 and the "
+                f"committed status; acceptance or assignment is not processing)")
+        return InputProcessedAck(event_id=r.event_id, input_index=r.event_id,
+                                 chunk_index=r.assigned_chunk,
+                                 generation_id=r.generation_id,
+                                 t2_committed_ns=r.t2_commit_ns)
 
     # ---------------------------------------------------------------- input
     def accept(self, controls: Optional[dict] = None, kind: str = "control",
@@ -296,6 +474,12 @@ class InteractiveRuntime:
             self.committed = CommittedState(
                 chunk_index=-1, generation_id=self.committed.generation_id + 1,
                 camera=self.committed.camera.copy(), applied_event_ids=())
+            # The input stream is session-wide, so a reset does NOT rewind the
+            # watermark. The inputs it just invalidated are terminal, so `settled`
+            # keeps advancing, while `processed` stops at the last real commit --
+            # that permanent gap is the honest signal that those inputs were dropped
+            # rather than consumed.
+            self._refresh_watermarks()
             return ev
 
         # ---- the immutable claim, bound exactly once, here ----
@@ -321,6 +505,7 @@ class InteractiveRuntime:
         rec.note = f"refused before assignment at generation " \
                    f"{self.committed.generation_id}"
         self._rejected.append((ev, reason))
+        self._refresh_watermarks()
         return rec
 
     def pending(self) -> list[InputEvent]:
@@ -376,6 +561,12 @@ class InteractiveRuntime:
             self._rejected.append((q.event, STALE))
         self._queue = deque(still_pending)
 
+        if stale:
+            # stale events just became terminal, so `settled` advances past them and
+            # `processed` does not: an input that expired at the frontier was never
+            # consumed.
+            self._refresh_watermarks()
+
         t1 = _now_ns if _now_ns is not None else time.perf_counter_ns()
         for q in assigned:
             r = self._records[q.event.event_id]
@@ -429,6 +620,7 @@ class InteractiveRuntime:
             r.note = reason or "chunk aborted"
             out.append(r)
         self._inflight = None
+        self._refresh_watermarks()
         return out
 
     def commit(self, meta: FrameMeta,
@@ -466,6 +658,17 @@ class InteractiveRuntime:
             r = self._records[eid]
             r.t2_commit_ns = t2
             r.terminal_status = COMMITTED
+        # §Latency-1C: this is THE point at which inputs become processed, so the
+        # watermark is refreshed here and nowhere else claims to advance it.
+        self._refresh_watermarks()
+        # the public per-chunk record, appended from the same state, so it cannot
+        # drift from the records it summarises
+        self._chunk_log.append(CommittedChunk(
+            chunk_index=snap["chunk_index"], generation_id=snap["generation_id"],
+            applied_event_ids=tuple(snap["applied_event_ids"]),
+            processed_input_index=self.committed.processed_input_index,
+            settled_input_index=self.committed.settled_input_index,
+            t2_committed_ns=t2))
         self._inflight = None
         return self.committed
 
@@ -558,6 +761,11 @@ class InteractiveRuntime:
             camera_v=vel,
             camera_gate=c.camera.gate,
             applied_event_ids=tuple(c.applied_event_ids),
+            # §Latency-1C: watermarks and chunk-log length belong to authoritative
+            # state, so a prewarm pass must be unable to move them either.
+            processed_input_index=c.processed_input_index,
+            settled_input_index=c.settled_input_index,
+            committed_chunks=len(self._chunk_log),
             queue=[(q.event.event_id, q.claim.key()) for q in self._queue],
             records=[(r.event_id, r.terminal_status, r.t1_assign_ns,
                       r.t2_commit_ns, r.t3_first_real_ns, r.assigned_chunk,

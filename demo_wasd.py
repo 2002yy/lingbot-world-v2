@@ -73,7 +73,8 @@ from typing import Optional
 
 import numpy as np
 
-from interactive_runtime import CameraState, InteractiveRuntime
+from interactive_runtime import (CameraState, InteractiveRuntime,
+                                 RuntimeStateError)
 
 HUD_TITLE_FALLBACK = "NVIDIA GeForce RTX 5060 Laptop GPU"
 
@@ -1311,7 +1312,34 @@ def main():
         print()
         dist("  of which: wait for in-flight chunk:", waits)
         dist("  of which: the event's own chunk:", owns)
+
+    # ---- §Latency-1C: acknowledgement and the watermark, on the real path ----
+    print()
+    print("  §Latency-1C input acknowledgement")
+    print(f"    processed_input_index  {rt.committed.processed_input_index:<5} "
+          f"every input up to it reached COMMITTED")
+    print(f"    settled_input_index    {rt.committed.settled_input_index:<5} "
+          f"no input up to it is still pending or in-flight")
+    ok_acks, bad = [], []
+    for r in recs:
+        try:
+            ok_acks.append(rt.processed_ack(r.event_id))
+        except RuntimeStateError:
+            bad.append(r.event_id)
+    print(f"    processed_ack          {len(ok_acks)}/{len(recs)} accepted inputs "
+          f"are in a committed state" + (f"; refused for {bad}" if bad else ""))
+    if ok_acks:
+        a = ok_acks[-1]
+        print(f"      last: event {a.event_id} -> chunk {a.chunk_index} "
+              f"gen {a.generation_id}  (t2 set: {a.t2_committed_ns is not None})")
+    log = rt.committed_chunks()
+    print(f"    committed_chunk log    {len(log)} chunks recorded"
+          + (f"; last carries inputs {list(log[-1].applied_event_ids)}, "
+             f"watermark {log[-1].processed_input_index}" if log else ""))
+    if waits:
         print()
+        print("    NOTE: the two watermarks differ only when an input ends without")
+        print("    being processed. They are equal here, which is the healthy case.")
         print("  NOTE ON THE FROZEN FIGURE. play.py's ~762 ms p50 is measured with a")
         print("  scripted source that only ever delivers input at a chunk boundary, so")
         print("  its assign wait is identically zero -- for free. A real keypress")
