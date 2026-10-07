@@ -1,5 +1,11 @@
 # Latency-1C: input acknowledgement and the processing watermark
 
+    STATUS   CLOSED
+    closed at  5f2490f   (stage gate GREEN, see the last section)
+    branch     latency-1c-input-ack, merged to community and demo at the same commit
+    scope      input identity, terminal state, processed acknowledgement, commit lineage
+    NOT in scope: renderer submit / present (that is 1D), preemption (that is 3B)
+
 ## Why this is 1C and not a renumbering of 1A/1B
 
 A proposal arrived to write this stage up as `Latency-1A` through `Latency-1E`
@@ -170,3 +176,47 @@ has not been shown to have teeth. Three deliberate defects were injected into
     watermark not refreshed on stale             14/15  (1 failure)
 
 and the file was then restored byte-identical and re-ran 15/15.
+
+## Stage gate, run at the exact head
+
+A stage boundary is the right place for one bounded, complete regression, at a pinned
+SHA, so the result cannot silently describe a different tree than the one being closed.
+Run at `5f2490f`, the code head:
+
+    head pinned to 5f2490f                         PASS
+    tracked tree clean, git diff --check            PASS
+    unit suite                                      PASS   69/69
+    demo mock smoke, no GPU                         PASS   12/12 (0 failures)
+    frozen code vs rtx5060-interactive-rc1          identical for wan/, play.py,
+        run.sh, run.ps1, setup.sh, setup.ps1, release_check.py, control_reduce.py,
+        preview_trace.py, chunk_phase.py
+        interactive_runtime.py differs, which IS this stage, and it is not under the tag
+    rtx5060-interactive-rc1 -> 1c3053d              PASS   unmoved
+    main                                            PASS   untouched
+    release_check.py --smoke --chunks 4             PASS   11/11, including the GPU path
+
+The closeout commit that added this section changes documentation only, so the code is
+byte-identical to the gated commit and the GPU result carries over rather than being
+re-run for a docs edit.
+
+## What "CLOSED" means here, and one semantic that is now frozen with it
+
+**A permanently stalled `processed_input_index` is correct behaviour, not a defect.** Once
+the contiguous prefix contains one input that terminated without being processed, the
+watermark stops there for the rest of the session, and it must. The inputs after it remain
+precisely traceable through per-event `processed_ack()` and through
+`CommittedChunk.applied_event_ids`; the watermark is deliberately the blunt instrument and
+is not the attribution authority.
+
+If operational reporting later wants something finer than "the prefix ended here", the
+addition is a separate gap or range summary. Changing the meaning of the existing field
+would break the one property it exists to provide.
+
+The three layers, and which one answers what:
+
+    strict   event_id in applied_event_ids / exact committed lineage   <- input attribution
+    coarse   the input falls inside this generation's processed range  <- client progress
+    raw      t0..t3 timestamps                                         <- how long it took
+
+Attribution first, timing second. A precise timestamp that cannot say which input it
+measured is not a latency measurement.
