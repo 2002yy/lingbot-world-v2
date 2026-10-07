@@ -329,6 +329,10 @@ class Worker(threading.Thread):
             meta = rt.new_frame_meta("real", chunk_index, snap["generation_id"],
                                      snap["applied_event_ids"])
             rt.commit(meta)
+            # C1: the pose advances HERE and only here, after commit has succeeded.
+            # Any path that skips this commit -- a failed, cancelled or retried chunk --
+            # leaves the reference pose where it was.
+            self.session.on_commit()
 
             real = self.session.decode_real(x0)
             rt.mark_real_decoded(meta)              # t3, after the frame exists
@@ -476,12 +480,39 @@ class WanSession:
         self.noise = torch.randn(16, args.n_chunks, lat_h, lat_w,
                                  generator=g, device=dev)
         self._prev_pose = None
+        self._candidate_pose = None       # C1: advanced only by on_commit()
+        self._chunk_rng_state = None      # C2: chunk-local RNG position
         self._gen = g
         self.preview_on = args.preview == "variant_d"
 
     def attach_runtime(self, rt):
         """The worker owns the runtime; the session only reads t0 from it."""
         self.rt = rt
+
+    # ------------------------------------------------- §Latency-3B-B1 C1 / C2
+    def on_commit(self):
+        """C1: the ONLY place the reference pose advances.
+
+        Called by the worker after `rt.commit()` has succeeded, and never on a failed,
+        cancelled or retried chunk. Before this, the pose advanced at the start of
+        generation, which made a replay lose the chunk's camera motion.
+        """
+        if getattr(self, "_candidate_pose", None) is None:
+            raise RuntimeStateError(
+                "on_commit without a candidate pose: denoise() must have run first")
+        self._prev_pose = self._candidate_pose
+        self._candidate_pose = None
+
+    def restore_chunk_rng(self):
+        """C2: put the generator back where this chunk started.
+
+        This is what makes a replay reproduce the chunk's per-step noise. The
+        uninterrupted path never calls it, so its random sequence is unchanged.
+        """
+        if getattr(self, "_chunk_rng_state", None) is None:
+            raise RuntimeStateError(
+                "restore_chunk_rng without a captured state: denoise() must have run")
+        self._gen.set_state(self._chunk_rng_state)
 
     # -- frame extraction --------------------------------------------------
     @staticmethod
@@ -561,7 +592,30 @@ class WanSession:
               "current_start": cid * self.frame_seqlen,
               "max_attention_size": self.kv_size,
               "frame_seqlen": self.frame_seqlen}
-        self._prev_pose = chunk_pose
+
+        # §Latency-3B-B1 / C1: the pose does NOT advance here.
+        #
+        # It is only ADVANCED on a successful authoritative commit, in on_commit()
+        # below. Advancing it at the start of generation -- which is what this used to
+        # do -- means a chunk that is cancelled or retried has already moved the
+        # reference the next chunk's relative pose is computed against, so a replay
+        # would compute inv(chunk_pose) @ chunk_pose = I and silently lose the camera
+        # motion of that chunk.
+        #
+        # begin / generate / fail / rebase  ->  _prev_pose unchanged
+        # successful commit                  ->  _prev_pose := committed pose
+        self._candidate_pose = chunk_pose
+
+        # §Latency-3B-B1 / C2: capture the chunk-local RNG position, so a replay of
+        # this chunk can reproduce its per-step noise exactly.
+        #
+        # Deliberately NOT a redefinition of the noise schedule. The generator's state
+        # is the whole stream position, so restoring it reproduces this chunk's draws
+        # exactly and an uninterrupted run continues on the old sequence untouched.
+        # That is strictly better than keying noise on (chunk, step): a key needs a
+        # namespace to avoid collisions across seeds and epochs, whereas the stream
+        # position cannot collide with itself.
+        self._chunk_rng_state = self._gen.get_state()
 
         cur = self.noise.split(1, dim=1)[cid]
         x0 = None
@@ -621,6 +675,11 @@ class MockSession:
 
     def attach_runtime(self, rt):
         self.rt = rt
+
+    def on_commit(self):
+        """C1's hook. The mock holds no reference pose, so nothing to advance; it
+        exists so the worker can call it unconditionally on both sessions."""
+        return None
 
     def _glyph(self, pose, tint):
         p = (np.asarray(pose, dtype=np.float64).ravel()

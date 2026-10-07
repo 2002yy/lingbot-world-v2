@@ -570,7 +570,18 @@ class InteractiveRuntime:
         t1 = _now_ns if _now_ns is not None else time.perf_counter_ns()
         for q in assigned:
             r = self._records[q.event.event_id]
-            r.t1_assign_ns = t1
+            # §Latency-3B-B1 / C3: t1 is WRITE-ONCE.
+            #
+            # Re-binding the same claim -- which is what a preemption replay does when
+            # it returns a cancelled batch and begins the chunk again -- must not
+            # overwrite the original assignment time. Overwriting would silently
+            # lengthen accept_to_assign and, worse, would make the recorded assignment
+            # time depend on how many times the chunk was attempted rather than on when
+            # the input was actually assigned.
+            #
+            # This does not change generation output: t1 is observation, not behaviour.
+            if r.t1_assign_ns is None:
+                r.t1_assign_ns = t1
             r.assigned_chunk = chunk_index
             r.generation_id = self.committed.generation_id
             r.terminal_status = IN_FLIGHT
