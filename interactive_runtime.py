@@ -718,6 +718,74 @@ class InteractiveRuntime:
                 r.t3_first_real_ns = t3
                 r.first_real_frame_id = meta.frame_id
 
+    def mark_renderer_submit(self, meta: FrameMeta,
+                             _now_ns: Optional[int] = None) -> None:
+        """t4. The authoritative frame was handed to a real, non-dummy display backend.
+
+        §Latency-1D adds this as the first writer of `t4_renderer_submit_ns`, which
+        §Latency-1B froze to None with no writer at all. The same shape as
+        mark_real_decoded, and the same reasons:
+
+        * only an authoritative frame, only after its chunk committed -- a submit
+          timestamp for a frame whose generation was never accepted would describe a
+          frame that does not exist;
+        * WRITE-ONCE. One authoritative frame is redrawn many times (the blend emits
+          several compositions), but only the first qualifying submission is t4.
+          Later redraws are separate display events, and letting one overwrite t4
+          would silently redefine the metric as "the last time it was drawn".
+
+        `_now_ns` is supplied by the CALLER because the submit happens on the UI thread,
+        which is the only place with a display, while this runtime is mutated by a
+        single worker thread. The timestamp is therefore taken at the submit and merely
+        recorded here: a t4 read by the worker when it got around to it would be wrong
+        by however long the worker was busy.
+        """
+        if meta.frame_kind != "real":
+            raise RuntimeStateError(f"t4 requires a real frame, got "
+                                    f"{meta.frame_kind!r}")
+        if meta.provenance != "authoritative":
+            raise RuntimeStateError(
+                f"refusing t4 for a {meta.provenance!r} frame: prewarm and warmup "
+                f"frames never reach a display")
+        if meta.generation_id != self.committed.generation_id:
+            raise RuntimeStateError(
+                f"refusing t4: frame generation {meta.generation_id} != committed "
+                f"generation {self.committed.generation_id}")
+        if meta.chunk_index > self.committed.chunk_index:
+            raise RuntimeStateError(
+                f"refusing t4: chunk {meta.chunk_index} is not committed yet "
+                f"(committed is {self.committed.chunk_index})")
+        for eid in meta.applied_event_ids:
+            r = self._records.get(eid)
+            if r is None:
+                raise RuntimeStateError(f"unknown event id {eid} in frame meta")
+            if r.t4_renderer_submit_ns is not None:
+                raise RuntimeStateError(
+                    f"refusing t4: frame {meta.frame_id} already has a first "
+                    f"renderer submit (write-once); a redraw is a display event, "
+                    f"not a new authoritative submit")
+            if r.t3_first_real_ns is not None and _now_ns is not None \
+                    and _now_ns < r.t3_first_real_ns:
+                raise RuntimeStateError(
+                    f"refusing t4 for event {eid}: submit {_now_ns} precedes its "
+                    f"decode {r.t3_first_real_ns}")
+        t4 = _now_ns if _now_ns is not None else time.perf_counter_ns()
+        for eid in meta.applied_event_ids:
+            self._records[eid].t4_renderer_submit_ns = t4
+
+    def renderer_submit_record(self, meta: FrameMeta) -> dict:
+        """The t4 lineage view. A view over existing authority, never a second copy."""
+        t4s = [self._records[e].t4_renderer_submit_ns
+               for e in meta.applied_event_ids if e in self._records]
+        t4s = [t for t in t4s if t is not None]
+        return {
+            "frame_id": meta.frame_id,
+            "generation_id": meta.generation_id,
+            "source_chunk_index": meta.chunk_index,
+            "applied_event_ids": tuple(meta.applied_event_ids),
+            "t4_renderer_submit_ns": (min(t4s) if t4s else None),
+        }
+
     # ---------------------------------------------------------------- traces
     def record(self, event_id: int) -> LatencyTraceRecord:
         try:
@@ -768,7 +836,8 @@ class InteractiveRuntime:
             committed_chunks=len(self._chunk_log),
             queue=[(q.event.event_id, q.claim.key()) for q in self._queue],
             records=[(r.event_id, r.terminal_status, r.t1_assign_ns,
-                      r.t2_commit_ns, r.t3_first_real_ns, r.assigned_chunk,
+                      r.t2_commit_ns, r.t3_first_real_ns, r.t4_renderer_submit_ns,
+                      r.assigned_chunk,
                       r.first_real_frame_id) for r in self.records()],
             next_event_id=self._next_event_id,
             next_frame_id=self._next_frame_id,

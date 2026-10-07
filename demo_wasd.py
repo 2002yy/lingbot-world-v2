@@ -146,6 +146,7 @@ class PreviewMsg:
 @dataclass
 class AuthoritativeMsg:
     frame: np.ndarray              # (H, W, 3) uint8 RGB
+    frame_id: int                  # so the viewer can name the frame it submitted
     chunk_index: int
     generation_id: int
     event_ids: tuple
@@ -211,10 +212,17 @@ class Worker(threading.Thread):
     """Owns the runtime and the session. The only thread that mutates either."""
 
     def __init__(self, rt: InteractiveRuntime, session, input_q: queue.Queue,
-                 frame_q: queue.Queue, stop_evt: threading.Event):
+                 frame_q: queue.Queue, stop_evt: threading.Event,
+                 submit_q: Optional[queue.Queue] = None):
         super().__init__(name="gpu-worker", daemon=True)
         self.rt, self.session = rt, session
         self.input_q, self.frame_q = input_q, frame_q
+        # §Latency-1D: the UI thread takes the t4 timestamp at the submit, because it
+        # is the only thread with a display, and hands it here. This thread is the only
+        # writer of runtime state, so the RECORD is written later than the instant it
+        # describes -- the timestamp is authoritative, its arrival is not.
+        self.submit_q = submit_q if submit_q is not None else queue.Queue()
+        self._metas: dict = {}
         self.stop = stop_evt
         self.invariants = {
             "previews_emitted": 0,
@@ -223,8 +231,34 @@ class Worker(threading.Thread):
             "t0_preserved": 0,
             "t0_mismatches": [],
             "chunks": 0,
+            "t4_recorded": 0,
+            "t4_already_set": 0,
+            "t4_unknown_frame": 0,
         }
         self.error: Optional[str] = None
+
+    def _drain_submits(self):
+        """Record t4 values the viewer took at the display submit."""
+        while True:
+            try:
+                frame_id, t4_ns = self.submit_q.get_nowait()
+            except queue.Empty:
+                return
+            meta = self._metas.get(frame_id)
+            if meta is None:
+                # the frame was already retired from the small map; not an error in
+                # a long run, but it must be visible rather than silent
+                self.invariants["t4_unknown_frame"] += 1
+                continue
+            try:
+                self.rt.mark_renderer_submit(meta, _now_ns=t4_ns)
+                self.invariants["t4_recorded"] += 1
+            except RuntimeStateError:
+                self.invariants["t4_already_set"] += 1
+            self._metas.pop(frame_id, None)
+            if len(self._metas) > 8:                    # bounded
+                for k in sorted(self._metas)[:-8]:
+                    del self._metas[k]
 
     def _drain_inputs(self):
         """Accept every queued key intent, preserving its real key timestamp.
@@ -263,6 +297,7 @@ class Worker(threading.Thread):
         rt = self.rt
         while not self.stop.is_set():
             self._drain_inputs()
+            self._drain_submits()
 
             # t1: binds this chunk's events and materialises the immutable
             # candidate camera exactly once. A retry would read the same
@@ -303,13 +338,18 @@ class Worker(threading.Thread):
             t3 = min([t for t in t3s if t is not None], default=None)
             authority_ms = ((t3 - min(t0s)) / 1e6
                             if (t3 is not None and t0s) else None)
+            self._metas[meta.frame_id] = meta
             self.frame_q.put(AuthoritativeMsg(
-                frame=real, chunk_index=chunk_index,
+                frame=real, frame_id=meta.frame_id, chunk_index=chunk_index,
                 generation_id=snap["generation_id"],
                 event_ids=snap["applied_event_ids"],
                 authority_ms=authority_ms,
                 chunk_ms=(time.perf_counter_ns() - t_chunk) / 1e6))
             self.invariants["chunks"] += 1
+        # a t4 taken on the last displayed frame can still be in flight when the loop
+        # ends; drop it only after giving it a chance to be recorded
+        time.sleep(0.05)
+        self._drain_submits()
 
 
 # ------------------------------------------------------- real model session
@@ -620,7 +660,7 @@ class Viewer:
     UI_FPS = 60
 
     def __init__(self, args, input_q, frame_q, stop_evt, title, pixel,
-                 ui_fps: int = 60):
+                 ui_fps: int = 60, submit_q: Optional[queue.Queue] = None):
         if args.headless:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
             os.environ["SDL_AUDIODRIVER"] = "dummy"
@@ -629,6 +669,7 @@ class Viewer:
         self.pygame = pygame
         self.args = args
         self.input_q, self.frame_q, self.stop = input_q, frame_q, stop_evt
+        self.submit_q = submit_q if submit_q is not None else queue.Queue()
         self.title_text, self.pixel = title, pixel
 
         pygame.init()
@@ -674,6 +715,18 @@ class Viewer:
                                 float(self.UI_FPS), args.record_fps)
         self._seq_idx = 0
         self._seq_t0: Optional[float] = None
+
+        # ---- §Latency-1D: t4 is taken HERE, at the submit -------------------
+        # `pygame.display.get_driver()` is read rather than trusting --headless, because
+        # SDL can fall back to a dummy driver on its own, and a t4 stamped there would
+        # describe a call with no display side.
+        self._display_is_real = pygame.display.get_driver() != "dummy"
+        self._pending_t4_frame: Optional[int] = None
+        self._blend_complete_pending = False
+        self.t4_stamped = 0
+        self.blend_complete_stamped = 0
+        self.submitted = []          # display-side trace, viewer-local by design
+        self.display_driver = pygame.display.get_driver()
         # --phase_n: a characterization run, not a performance. Events fire at
         # randomized offsets so the input's phase against the chunk boundary is
         # uniform, which is what a real keypress actually experiences. Single keys
@@ -807,6 +860,11 @@ class Viewer:
                         model_ms=msg.model_ms,
                         committed_at_emit=msg.committed_at_emit))
             elif isinstance(msg, AuthoritativeMsg):
+                # D1: the FIRST composition that contains this authoritative frame is
+                # the one drawn on the next tick, whether that is a 25% blend step or a
+                # hard replace. The end of the blend is a different metric (D2).
+                if self._display_is_real:
+                    self._pending_t4_frame = msg.frame_id
                 if not self._ready:
                     self._ready = True
                     # _t_wall_start is perf_counter() seconds, so this must use the
@@ -844,6 +902,9 @@ class Viewer:
             self.blend_from = self.blend_to = None
             self.badge = "AUTHORITATIVE"
             self.blend_completed += 1
+            # D2: the blend finished on this tick, so this tick's submit is the
+            # blend-complete submit. Kept separate from t4 on purpose.
+            self._blend_complete_pending = True
             return
         a = self.blend_i / float(self.blend_n + 1)
         self.display_f = self.blend_from * (1.0 - a) + self.blend_to * a
@@ -965,7 +1026,29 @@ class Viewer:
 
             self._drain_frames()
             self._advance_blend()
+
+            # §Latency-1D, decision D4: stamped immediately BEFORE the display-update
+            # call, at the moment the composition is handed to the backend. Stamping
+            # after would fold the swap/vsync wait into a submit metric. Decision D5:
+            # taken here on the UI thread but RECORDED by the worker, which is the only
+            # thread allowed to mutate the runtime.
             self._draw(self.clock.get_fps())
+            if self._display_is_real and (
+                    self._pending_t4_frame is not None
+                    or self._blend_complete_pending):
+                now_ns = time.perf_counter_ns()
+                if self._pending_t4_frame is not None:
+                    self.submit_q.put((self._pending_t4_frame, now_ns))
+                    self.submitted.append(
+                        dict(frame_id=self._pending_t4_frame, t4_ns=now_ns,
+                             chunk_index=self.last_chunk))
+                    self._pending_t4_frame = None
+                    self.t4_stamped += 1
+                if self._blend_complete_pending:
+                    self.blend_complete_stamped += 1
+                    self._blend_complete_pending = False
+                    if self.submitted:
+                        self.submitted[-1]["blend_complete_ns"] = now_ns
             pygame.display.flip()
             self.stats["frames_drawn"] += 1
             if self.rec is not None and self._ready:
@@ -987,10 +1070,12 @@ def run_mock_smoke(args) -> int:
     print("  §Demo-1 mock smoke (no GPU, SDL dummy)")
     print("=" * 78)
 
-    args.headless = True
+    windowed = bool(getattr(args, "mock_windowed", False))
+    args.headless = not windowed
     args.record = None
     args.script = True
     seconds = args.seconds or 4.0
+    print(f"  mode: {'WINDOWED (real driver, t4 exists)' if windowed else 'HEADLESS (dummy driver, t4 must not exist)'}")
 
     rt = InteractiveRuntime(CameraState(pose=np.eye(4), v=np.zeros(3), gate=1.0))
     session = MockSession(h=304, w=528, step_ms=args.mock_step_ms)
@@ -998,12 +1083,13 @@ def run_mock_smoke(args) -> int:
 
     input_q: queue.Queue = queue.Queue()
     frame_q: queue.Queue = queue.Queue()
+    submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
-    worker = Worker(rt, session, input_q, frame_q, stop)
+    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q)
     worker.start()
 
     viewer = Viewer(args, input_q, frame_q, stop, HUD_TITLE_FALLBACK, args.pixel,
-                    ui_fps=240)
+                    ui_fps=240, submit_q=submit_q)
     drawn = viewer.run(seconds)
 
     time.sleep(min(0.5, args.mock_step_ms / 1000.0 * 3))   # let the drain catch up
@@ -1059,6 +1145,43 @@ def run_mock_smoke(args) -> int:
     check("frames were drawn", drawn["frames_drawn"] > 0,
           f"{drawn['frames_drawn']} frames")
 
+    # ---- §Latency-1D: T1 first-submit semantics, T2 write-once, T3 headless absence
+    if viewer.display_driver == "dummy":
+        check("T3 headless: t4 does NOT exist (dummy driver presents nothing)",
+              viewer.t4_stamped == 0
+              and all(r.t4_renderer_submit_ns is None for r in recs)
+              and inv["t4_recorded"] == 0,
+              f"stamped {viewer.t4_stamped}, recorded {inv['t4_recorded']}")
+    else:
+        check("T1 windowed: t4 exists at all (real driver)",
+              viewer.t4_stamped > 0 and inv["t4_recorded"] > 0,
+              f"stamped {viewer.t4_stamped}, recorded {inv['t4_recorded']}")
+        # T1: t4 is the FIRST submit containing the real frame, so it must not be the
+        # blend-complete submit -- the two happen on the same tick only if the blend
+        # is a single step, which it is not at 50 ms / 60 fps
+        pairs = [s for s in viewer.submitted if "blend_complete_ns" in s]
+        check("T1 first-submit is earlier than blend-complete when a blend ran",
+              all(s["t4_ns"] <= s["blend_complete_ns"] for s in pairs),
+              f"{len(pairs)} pairs with both stamps")
+        blended = viewer.blend_completed > 0 and len(pairs) > 0
+        check("T1 a blend did run, so the distinction was actually exercised",
+              blended, f"blends completed {viewer.blend_completed}, "
+                       f"pairs {len(pairs)}")
+        # T2: write-once
+        check("T2 write-once: no redraw overwrote an existing t4",
+              inv["t4_already_set"] == 0
+              and inv["t4_recorded"] == viewer.t4_stamped,
+              f"stamped {viewer.t4_stamped}, recorded {inv['t4_recorded']}, "
+              f"refusals {inv['t4_already_set']}")
+        # T6 monotonicity, where both exist
+        mono = all(r.t3_first_real_ns <= r.t4_renderer_submit_ns for r in recs
+                   if r.t4_renderer_submit_ns is not None
+                   and r.t3_first_real_ns is not None)
+        check("T6 t3 <= t4 wherever both exist", mono)
+        # T5: nothing anywhere produced a t5
+        check("T5 no path produced a t5_presented_ns",
+              all(r.t5_present_ns is None for r in recs))
+
     if args.out_json:
         with open(args.out_json, "w") as f:
             json.dump(dict(invariants=inv, stats=viewer.stats,
@@ -1110,6 +1233,10 @@ def build_args(argv=None):
                     help="SDL dummy driver: render and record with no window")
     ap.add_argument("--mock", action="store_true",
                     help="CPU/mock smoke: real runtime, synthetic frames, no GPU")
+    ap.add_argument("--mock_windowed", action="store_true",
+                    help="with --mock: use a REAL SDL driver instead of dummy, so the "
+                         "§Latency-1D display boundary exists and T1/T2 can be "
+                         "asserted. Needs a display (WSLg is enough).")
     ap.add_argument("--phase_n", type=int, default=0,
                     help="characterization run: fire this many single-key events at "
                          "randomized offsets so the input phase against the chunk "
@@ -1238,11 +1365,13 @@ def main():
 
     input_q: queue.Queue = queue.Queue()
     frame_q: queue.Queue = queue.Queue()
+    submit_q: queue.Queue = queue.Queue()
     stop = threading.Event()
-    worker = Worker(rt, session, input_q, frame_q, stop)
+    worker = Worker(rt, session, input_q, frame_q, stop, submit_q=submit_q)
     worker.start()
 
-    viewer = Viewer(args, input_q, frame_q, stop, title, args.pixel)
+    viewer = Viewer(args, input_q, frame_q, stop, title, args.pixel,
+                    submit_q=submit_q)
     stats = viewer.run(args.seconds)
     stop.set()
     worker.join(timeout=60)
@@ -1340,6 +1469,7 @@ def main():
         print()
         print("    NOTE: the two watermarks differ only when an input ends without")
         print("    being processed. They are equal here, which is the healthy case.")
+
         print("  NOTE ON THE FROZEN FIGURE. play.py's ~762 ms p50 is measured with a")
         print("  scripted source that only ever delivers input at a chunk boundary, so")
         print("  its assign wait is identically zero -- for free. A real keypress")
@@ -1352,8 +1482,32 @@ def main():
               f"{viewer.ready_ms/1000:.1f} s (cold chunk, excluded from --seconds)")
     if inv["chunks"]:
         print(f"  chunks generated                   {inv['chunks']}")
-    print("  input -> renderer submit           UNAVAILABLE (no renderer)")
-    print("  input -> present                   UNAVAILABLE (no present signal)")
+    # ---- §Latency-1D: renderer submit, or an explicit reason it cannot exist ----
+    print()
+    print("  §Latency-1D renderer submit")
+    print(f"    display driver          {viewer.display_driver}")
+    if viewer.display_driver == "dummy":
+        print("    t4 renderer submit      unavailable  "
+              "(renderer_submit_unavailable = \"headless_dummy_driver\")")
+        print("                            a dummy driver presents nothing, so a")
+        print("                            timestamp taken there would describe a call")
+        print("                            with no display side. NOT synthesised.")
+    else:
+        t4v = [(r.t4_renderer_submit_ns - r.t0_accept_ns) / 1e6
+               for r in committed if r.t4_renderer_submit_ns is not None]
+        dist("    keypress -> renderer submit:", t4v)
+        rds = [(r.t4_renderer_submit_ns - r.t3_first_real_ns) / 1e6
+               for r in committed
+               if r.t4_renderer_submit_ns is not None
+               and r.t3_first_real_ns is not None]
+        dist("    real decode -> submit:", rds)
+        print(f"    t4 stamped at submit    {viewer.t4_stamped}   "
+              f"write-once refusals {inv['t4_already_set']}   "
+              f"unknown frames {inv['t4_unknown_frame']}")
+        print(f"    blend-complete submits  {viewer.blend_complete_stamped}   "
+              f"(a separate metric from t4, by contract)")
+    print("    t5 physical present     UNAVAILABLE (no present-completion signal)")
+    print("    input -> present        NOT MEASURED")
     print()
     print(f"  frames drawn {stats['frames_drawn']}   "
           f"previews shown {stats['preview_shown']}   "
@@ -1381,7 +1535,15 @@ def main():
                            preview_trace=viewer.preview_trace,
                            committed_chunk=rt.committed.chunk_index,
                            records=rt.export(),
-                           t4_available=False, t5_available=False), f, indent=2)
+                           display_driver=viewer.display_driver,
+                           renderer_submit_unavailable=(
+                               "headless_dummy_driver"
+                               if viewer.display_driver == "dummy" else None),
+                           t4_stamped=viewer.t4_stamped,
+                           blend_complete_stamps=viewer.blend_complete_stamped,
+                           submitted=viewer.submitted,
+                           t4_available=(viewer.display_driver != "dummy"),
+                           t5_available=False), f, indent=2)
         print(f"  wrote {args.out_json}")
 
 
