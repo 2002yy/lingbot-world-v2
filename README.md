@@ -140,6 +140,12 @@ python demo_wasd.py --script --headless --seconds 10 \
 
 The recorded take uses `--script`, which posts real KEYDOWN/KEYUP events through the same handler a human's keys go through — only the source of the press is automated. Run without `--script` for live play. See [docs/DEMO_1_WASD_VIEWER.md](docs/DEMO_1_WASD_VIEWER.md) for the acceptance checks and the three defects found while building it.
 
+**This GIF is a scripted take, not a live-keyboard take.** The distinction is checkable rather than a matter of trust: a live take is verified by [`verify_live_take.py`](verify_live_take.py), which requires `input_source == "live_keyboard"` and a real OS scancode on every recorded intent. Synthetic events in this tree carry `scancode=0`, so the verifier rejects them — and it has been seen rejecting the scripted take above before being trusted to accept anything.
+
+A live-keyboard take would be labelled **Live keyboard WASD** and shipped with its lineage trace (`take.json`) and an unedited recording, per [docs/LATENCY_3B_D_DEFAULT_QUALIFICATION.md](docs/LATENCY_3B_D_DEFAULT_QUALIFICATION.md) and the manifest format in `docs/demo/live/MANIFEST.md`.
+
+What the recording is **not**: it is not a latency measurement, it is not all authoritative model output (a **preview** is shown first and blends into the real frame over 50 ms), and it is not a model-native frame rate. Physical display presentation completion is not measured anywhere in this project.
+
 ### Interactive preemption
 
 Interactive preemption policy v1 is **enabled by default** for the interactive runtime. Pass `--no-preempt` to turn it off.

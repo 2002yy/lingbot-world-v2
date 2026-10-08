@@ -1075,7 +1075,7 @@ class Viewer:
     def _name(self, key):
         return key_table(self.pygame).get(key)
 
-    def _emit_intent(self, newly_pressed: str):
+    def _emit_intent(self, newly_pressed: str, event=None):
         held = frozenset(self.held_keys)
         controls = compose_intent(held, newly_pressed)
         if not controls:
@@ -1083,8 +1083,23 @@ class Viewer:
         t0_ns = time.perf_counter_ns()          # t0 is stamped HERE, at the event
         self.input_q.put((t0_ns, controls))
         self.stats["intents_sent"] += 1
-        self.trace.append(dict(t0_ns=t0_ns, controls=controls,
-                               held=sorted(held)))
+        # §Live-take provenance. A take that claims to be human-operated has to be
+        # checkable, so every intent records where the keystroke came from:
+        #   scancode   the OS scan code. Events posted by --script or --shakedown carry
+        #              scancode=0 because those code paths never set one, whereas a real
+        #              keyboard event always has a real one.
+        #   key_unicode  the character SDL produced, empty for synthetic events.
+        #   mod        modifier bitmask, likewise from the real event.
+        # Alongside `input_source` in the run metadata this is evidence, not proof --
+        # nothing stops a determined forgery -- but it is checkable by a third party,
+        # which is what a published take needs.
+        self.trace.append(dict(
+            t0_ns=t0_ns, controls=controls, held=sorted(held),
+            key=(getattr(event, "key", None) if event is not None else None),
+            scancode=(getattr(event, "scancode", None) if event is not None else None),
+            unicode=(getattr(event, "unicode", "") if event is not None else ""),
+            mod=(getattr(event, "mod", None) if event is not None else None),
+            key_name=newly_pressed))
 
     def _handle_key(self, e):
         pygame = self.pygame
@@ -1097,7 +1112,7 @@ class Viewer:
             if name in self.held_keys:
                 return              # no OS key repeat: one press, one intent
             self.held_keys.add(name)
-            self._emit_intent(name)
+            self._emit_intent(name, e)
         elif e.type == pygame.KEYUP:
             self.held_keys.discard(name)
 
@@ -2096,6 +2111,14 @@ def main():
                            # without knowing which arm and load produced it
                            arm=args.arm,
                            load=args.load,
+                           # §Live-take provenance: which input source produced this
+                           # run. A take that is published as human-operated must not
+                           # have been driven by --script or --shakedown, and this is
+                           # the field a third party checks.
+                           input_source=("scripted" if args.script
+                                         else "shakedown" if args.shakedown
+                                         else "live_keyboard"),
+                           display_driver_live=(viewer.display_driver != "dummy"),
                            preempt_boundaries=list(worker.policy.boundaries),
                            preemption_trace=worker.preemption_trace,
                            admission_tally=worker.policy.tally,
