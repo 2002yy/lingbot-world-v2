@@ -140,6 +140,43 @@ python demo_wasd.py --script --headless --seconds 10 \
 
 The recorded take uses `--script`, which posts real KEYDOWN/KEYUP events through the same handler a human's keys go through — only the source of the press is automated. Run without `--script` for live play. See [docs/DEMO_1_WASD_VIEWER.md](docs/DEMO_1_WASD_VIEWER.md) for the acceptance checks and the three defects found while building it.
 
+### Interactive preemption
+
+Interactive preemption policy v1 is **enabled by default** for the interactive runtime. Pass `--no-preempt` to turn it off.
+
+Policy v1:
+
+- preempts only for a changed control intent;
+- may preempt only after the first forward boundary;
+- allows at most one rebase per chunk;
+- preserves the no-preemption generation trajectory when no preemption occurs;
+- does not use cooldown, debounce, or predicted-benefit heuristics.
+
+On RTX 5060 Laptop 8GB at 304×528 using the BF16 performance preset, interleaved A/B measurements produced:
+
+| Input workload | Baseline p50 | Preemption p50 | Delta | Forward waste |
+|---|---:|---:|---:|---:|
+| Normal WASD | 956 ms | 709 ms | **−247 ms (−26%)** | 3.8–6.4% |
+| Hold / repeated-state stress | 849 ms | 858 ms | **+9 ms — effectively neutral** | 0–0.7% |
+| Rapid 200 ms direction changes | 892 ms | 886 ms | **−6 ms — effectively neutral** | 20–23% |
+
+The primary product result is therefore **not** that preemption always reduces latency.
+
+Under a **normal WASD workload** it reduced median input-to-first-real-frame latency by approximately 247 ms, while stable/hold input showed essentially no effect. Under an intentionally aggressive 200 ms direction-change workload, latency was approximately unchanged while redundant generation work increased substantially.
+
+Real keyboard hold behavior is less aggressive than the synthetic hold workload: OS/key-repeat events are suppressed upstream, and a 20-second qualification run admitted only the actual direction changes, producing 2 preemptions across 35 chunks with approximately 1.4% wasted work.
+
+Measurements used interleaved A/B arms with fixed VRAM-cleanliness and thermal-pairing gates. Earlier sequential hold/rapid measurements were rejected because GPU thermal drift was large enough to dominate the apparent effect.
+
+Latency terminology is deliberately bounded:
+
+- `input → first real frame` is measured;
+- `input → renderer submit` is measured on the windowed viewer path;
+- physical display presentation completion is **not measured**;
+- renderer submit must not be reported as physical present latency.
+
+These measurements qualify policy v1 as the default interactive policy for the tested RTX 5060 Laptop 8GB / 304×528 / BF16 configuration. They are **not** yet a claim of identical gains across other GPUs, geometries, presets, seeds, or input distributions.
+
 ### Presets
 
 | preset | weights | peak reserved | min free | role |

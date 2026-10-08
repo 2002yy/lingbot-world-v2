@@ -1666,10 +1666,16 @@ def build_args(argv=None):
     ap.add_argument("--input_period_ms", type=float, default=200.0,
                     help="shakedown input rate. 200 ms against a ~600 ms chunk means "
                          "most chunks see an intent mid-flight")
+    ap.add_argument("--no-preempt", dest="no_preempt", action="store_true",
+                    help="turn OFF the default interactive preemption policy v1. The "
+                         "default is ON, qualified by §Latency-3B-D: under a normal WASD "
+                         "workload it cut median input-to-first-real by ~247 ms; under "
+                         "hold it was neutral and under rapid it was neutral at 20-23%% "
+                         "wasted forward work.")
     ap.add_argument("--preempt_boundaries", default="1",
-                    help="§Latency-3B-C1. Comma-separated forward boundaries where a "
-                         "preemption may be admitted. '1' is the conservative first "
-                         "cut. '' disables preemption entirely (the eventual A arm).")
+                    help="advanced: comma-separated forward boundaries where a "
+                         "preemption may be admitted. Default '1' is policy v1. '' is "
+                         "the same as --no-preempt.")
     ap.add_argument("--preempt_min_remaining", type=int, default=2,
                     help="require at least this many forwards still to run, so a "
                          "boundary with nothing left to save is rejected as too_late")
@@ -1678,7 +1684,15 @@ def build_args(argv=None):
                          "otherwise the mechanism was never actually exercised")
     ap.add_argument("--mock_step_ms", type=float, default=90.0)
     ap.add_argument("--out_json", default=None)
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    # §Latency-3B-D: --no-preempt folds into the boundary set HERE, not at the call site,
+    # so that "the flag turned policy v1 off" is a property of parsing rather than of one
+    # particular entry path. The first version applied it in main(), which meant a caller
+    # that used build_args directly silently got preemption anyway -- and the release gate
+    # caught exactly that.
+    if getattr(args, "no_preempt", False):
+        args.preempt_boundaries = ""
+    return args
 
 
 def device_probe():
