@@ -1031,6 +1031,8 @@ class Viewer:
         self._seq_t0: Optional[float] = None
         self._shake_next: Optional[float] = None
         self._shake_i = 0
+        self._hold_phase: Optional[int] = None
+        self._hold_last_down: Optional[float] = None
 
         # ---- §Latency-1D: t4 is taken HERE, at the submit -------------------
         # `pygame.display.get_driver()` is read rather than trusting --headless, because
@@ -1114,6 +1116,38 @@ class Viewer:
                 # keypress goes through, so the input path is the real one and
                 # only the source of the press is automated.
                 self.pygame.event.post(ev)
+
+    def _run_hold_real(self, now_s: float):
+        """§Latency-3B-D2. The REAL keyboard hold, modelled faithfully.
+
+        This is the load the product actually has, and the synthetic `hold` is not it.
+        A real held key produces ONE KEYDOWN, then OS key-repeat KEYDOWNs that never
+        carry a KEYUP -- and `_handle_key` ignores a repeat of a key already held, so a
+        long press yields exactly ONE intent. Synthetic `hold` posted KEYUP before each
+        KEYDOWN, which forced a repeat through and is not what a keyboard does.
+
+        Sequence: hold W, release, hold D, release. Repeated KEYDOWN with no KEYUP is
+        exactly what SDL delivers under OS key repeat, so this exercises the real
+        suppression path rather than bypassing it.
+        """
+        pygame = self.pygame
+        table = {"W": pygame.K_w, "D": pygame.K_d}
+        seg = max(1.0, self.args.hold_segment_s)
+        phase = int(now_s // seg)          # 0 = hold W, 1 = released, 2 = hold D, ...
+        names = ["W", "W", "D", "D"]
+        name = names[phase % len(names)]
+        if self._hold_phase != phase:
+            # a transition: release whatever was down, which is what a real keyup is
+            for k in sorted(self.held_keys):
+                pygame.event.post(pygame.event.Event(
+                    pygame.KEYUP, key=table.get(k, pygame.K_w), mod=0,
+                    unicode="", scancode=0))
+            self._hold_phase = phase
+        # OS key repeat: KEYDOWN again with NO KEYUP. The handler must ignore it.
+        if now_s - (self._hold_last_down or -1) >= self.args.repeat_ms / 1000.0:
+            self._hold_last_down = now_s
+            pygame.event.post(pygame.event.Event(
+                pygame.KEYDOWN, key=table[name], mod=0, unicode="", scancode=0))
 
     def _run_shakedown(self, now_s: float):
         """§Latency-3B-C0 sustained input: one discrete intent every period.
@@ -1371,7 +1405,10 @@ class Viewer:
                 break
 
             if self.args.shakedown and self._ready:
-                self._run_shakedown(now - self._seq_t0)
+                if self.args.load == "hold_real":
+                    self._run_hold_real(now - self._seq_t0)
+                else:
+                    self._run_shakedown(now - self._seq_t0)
             elif self._phase_plan is not None and self._ready:
                 self._run_phase(now - self._seq_t0)
             elif self.args.script and self._ready:
@@ -1616,7 +1653,13 @@ def build_args(argv=None):
     ap.add_argument("--arm", default="B",
                     help="label for the §Latency-3B-C A/B: 'A' (baseline, preemption "
                          "disabled) or 'B' (policy v1). Recorded, not interpreted.")
-    ap.add_argument("--load", default="rapid", choices=["hold", "normal", "rapid"],
+    ap.add_argument("--hold_segment_s", type=float, default=3.0,
+                    help="D2: seconds per phase of the real-keyboard hold sequence")
+    ap.add_argument("--repeat_ms", type=float, default=100.0,
+                    help="D2: OS key-repeat interval modelled by repeated KEYDOWN with "
+                         "no KEYUP, which the handler must ignore")
+    ap.add_argument("--load", default="rapid",
+                    choices=["hold", "hold_real", "normal", "rapid"],
                     help="shakedown input load. hold re-sends the same intent (the "
                          "semantic check's stress case), normal is a ~1 s turn rhythm, "
                          "rapid is ~200 ms direction changes")
