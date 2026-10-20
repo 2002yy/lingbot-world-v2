@@ -35,6 +35,193 @@ The real-time version of LingBot-World-Infinity is available on two platforms. W
 
 > **Note:** Reactor and LingGuang provide a convenient way to try LingBot-World-Infinity in real time. In our official setup, the model runs at full capability. To experience our official demo, join us at [WAIC 2026](https://waica2026.worldaic.com.cn/).
 
+-----
+
+## 🖥️ Community: Interactive LingBot-World 2.0 on RTX 5060 Laptop 8GB
+
+> **Community runtime and deployment work — not part of the official Robbyant release.**
+
+Run the **LingBot-World-V2-1.3B-Causal-Fast** world model interactively on a **single RTX 5060 Laptop GPU with 8 GB VRAM**, with live WASD camera control, a low-latency causal preview, and a correctness-preserving authoritative world state.
+
+**RTX 5060 Laptop 8GB · 304×528 · zero additional training**
+
+```
+593 ms p50   arbitrary-phase causal preview
+1.03 s p50   first authoritative real frame
+232 ms       best observed preview
+```
+
+Measured over N=30 single-key events at randomized offsets, so the input's phase against the chunk boundary is uniform — what a real keypress actually experiences. Boundary-aligned harness measurements (favourable phase, wait for the in-flight chunk excluded) are `~231 ms` preview and `~820 ms` authority; see [Scope of the latency figures](#scope-of-the-latency-figures).
+
+### What this adds
+
+- **Live WASD interaction** instead of a predefined camera trajectory.
+- **~231 ms causal visual feedback** through a zero-training preview path.
+- **Preview and authority are separate:** speculative frames cannot commit world state or claim authoritative latency.
+- A **50 ms preview → authoritative handoff** whose 60 Hz-equivalent evaluation reduced the peak correction step to about **0.25×** hard replacement. See the erratum in [`docs/RC_FROZEN.md`](docs/RC_FROZEN.md): the ratio is a property of the linear blend construction, but the absolute image-difference it was computed from is single-channel because of a reduction bug in `play.py`.
+- **Single-GPU 8 GB deployment**, validated on an RTX 5060 Laptop GPU.
+- Frozen `performance` (BF16) and `lowmem` (weight-only FP8) deployment presets.
+- Release tooling, runtime tracing, fail-closed state commits, exactly-once control application, stale-event handling, and prewarm isolation.
+
+### Quick start
+
+```bash
+./setup.sh
+./run.sh play
+./run.sh smoke
+```
+
+Windows:
+
+```powershell
+.\setup.ps1
+.\run.ps1 play
+```
+
+### Scope of the latency figures
+
+Two different conditions are measured in this work, and the headline quotes the second.
+
+| Condition | preview | first authoritative real frame |
+|---|---:|---:|
+| **Boundary-aligned harness** (`play.py`, scripted source, wait for the in-flight chunk is zero for free) | ~231 ms | ~820 ms |
+| **Arbitrary-phase keypress** (N=30, randomized offsets) | **593 ms p50** (p90 788) | **1033 ms p50** (p90 1269) |
+
+The typical figure decomposes as **414 ms** waiting for the in-flight chunk + **591 ms** for the event's own chunk + ~28 ms decode. Only the second term is the event's own computation; the first is a stage the boundary-aligned number does not contain, because a scripted source that only ever fires at a chunk boundary never pays it. The best observed preview, 232 ms, is where the release's `~231 ms` lands.
+
+### Measured interaction timeline
+
+| Stage | RTX 5060 Laptop 8GB |
+|---|---:|
+| Input → runtime assignment | ~1 ms class |
+| Causal preview decoded | **~231 ms** |
+| Preview decoder alone | **27.2 ms p50** |
+| Input → first authoritative real frame | **~820 ms p50** |
+| Preview → authoritative handoff policy | **50 ms** |
+| Renderer submit (`t4`) | **Unavailable** |
+| Physical present (`t5`) | **Unavailable** |
+| Input → physical display | **Not claimed / not measurable in this tree** |
+
+`~231 ms` is **model-side decoded preview timing**, not physical display latency. The `~820 ms` figure is the measured input-to-first-authoritative-real-frame path in the release run. Because this tree has no renderer-submit or physical-present signal, it intentionally does **not** substitute a proxy timestamp and call it input-to-display latency.
+
+**These two figures are boundary-aligned input.** The release run's input source is scripted and delivers each event at the top of the chunk loop, so its wait for the in-flight chunk is identically zero. A real keypress arrives at an arbitrary phase and must first let the current chunk finish, so the range a person experiences is one to two chunk periods — see the demo below, which measures exactly that.
+
+### WASD interaction demo
+
+![RTX 5060 Laptop 8GB WASD interaction demo](docs/demo/rtx5060_wasd_demo.gif)
+
+WASD over the frozen runtime, recorded from the viewer's own framebuffer. Each press is one discrete control intent. **PREVIEW** appears as soon as the step-0 latent is decodable, then blends into the **AUTHORITATIVE** frame over 50 ms.
+
+**This take is scripted, not hand-driven.** `--script` posts real `KEYDOWN`/`KEYUP` events, so they pass through the same handler, the same timestamping and the same runtime path a human's keys pass through — but the source of the press is automated. The claim this supports is "WASD interaction works and here is what it looks like", not "a person was typing". A hand-driven take would be labelled **Live keyboard WASD**.
+
+The GIF above is the whole take, in this repo. The full-resolution h264 (`960×540`, 30 fps, 10 s) is attached to the [**demo-media** release](https://github.com/2002yy/lingbot-world-v2/releases/tag/demo-media) rather than committed — this repo's `.gitignore` excludes `*.mp4`, and GitHub's markdown sanitizer does not render an inline `<video>` player from a release asset URL either, so it is a link instead. Regenerate it with the command below if you want it locally.
+
+From the keypress, model-side, at 304×528 bf16. **n=30**, single-key events fired at randomized offsets so the input's phase against the chunk boundary is uniform — `python demo_wasd.py --phase_n 30`:
+
+| | p50 | p90 | best | worst |
+|---|---:|---:|---:|---:|
+| → preview decoded | **593 ms** | 788 ms | **232 ms** | 827 ms |
+| → first authoritative real frame | **1033 ms** | 1269 ms | 643 ms | 1301 ms |
+| of which: wait for the in-flight chunk | 414 ms | 597 ms | 63 ms | 641 ms |
+| of which: the event's own chunk | 591 ms | 667 ms | 553 ms | 683 ms |
+
+The decomposition is the point. That first row is the term the boundary-aligned release figures get to set to zero for free, and it is not noise: it is bounded by the chunk period (63–641 ms observed against a ~650 ms chunk), because an intent arriving just before a boundary waits almost nothing and one arriving just after waits for most of a chunk.
+
+Note what the "best" column is: **232 ms to preview is the release's ~231 ms.** That figure is real, it is simply the favourable end of the phase distribution rather than the typical one. The p50 is 593 ms.
+
+This is also where any future latency work has to aim. Faster kernels shrink both the in-flight wait and the event's own chunk; only making the in-flight chunk interruptible can remove most of the first term — and that is a different, harder problem than an early-exit, because the runtime's queue/frontier semantics deliberately claim a new input to the *next* chunk.
+
+```bash
+python demo_wasd.py                                    # live, windowed
+python demo_wasd.py --mock                             # CPU-only smoke, no GPU
+python demo_wasd.py --script --headless --seconds 10 \
+  --record docs/demo/rtx5060_wasd_demo.mp4 --record_fps 30   # the take above
+```
+
+The recorded take uses `--script`, which posts real KEYDOWN/KEYUP events through the same handler a human's keys go through — only the source of the press is automated. Run without `--script` for live play. See [docs/DEMO_1_WASD_VIEWER.md](docs/DEMO_1_WASD_VIEWER.md) for the acceptance checks and the three defects found while building it.
+
+**This GIF is a scripted take, not a live-keyboard take.** The distinction is checkable rather than a matter of trust: a live take is verified by [`verify_live_take.py`](verify_live_take.py), which requires `input_source == "live_keyboard"` and a real OS scancode on every recorded intent. Synthetic events in this tree carry `scancode=0`, so the verifier rejects them — and it has been seen rejecting the scripted take above before being trusted to accept anything.
+
+A live-keyboard take would be labelled **Live keyboard WASD** and shipped with its lineage trace (`take.json`) and an unedited recording, per [docs/LATENCY_3B_D_DEFAULT_QUALIFICATION.md](docs/LATENCY_3B_D_DEFAULT_QUALIFICATION.md) and the manifest format in `docs/demo/live/MANIFEST.md`.
+
+What the recording is **not**: it is not a latency measurement, it is not all authoritative model output (a **preview** is shown first and blends into the real frame over 50 ms), and it is not a model-native frame rate. Physical display presentation completion is not measured anywhere in this project.
+
+### Interactive preemption
+
+Interactive preemption policy v1 is **enabled by default** for the interactive runtime. Pass `--no-preempt` to turn it off.
+
+Policy v1:
+
+- preempts only for a changed control intent;
+- may preempt only after the first forward boundary;
+- allows at most one rebase per chunk;
+- preserves the no-preemption generation trajectory when no preemption occurs;
+- does not use cooldown, debounce, or predicted-benefit heuristics.
+
+On RTX 5060 Laptop 8GB at 304×528 using the BF16 performance preset, interleaved A/B measurements produced:
+
+| Input workload | Baseline p50 | Preemption p50 | Delta | Forward waste |
+|---|---:|---:|---:|---:|
+| Normal WASD | 956 ms | 709 ms | **−247 ms (−26%)** | 3.8–6.4% |
+| Hold / repeated-state stress | 849 ms | 858 ms | **+9 ms — effectively neutral** | 0–0.7% |
+| Rapid 200 ms direction changes | 892 ms | 886 ms | **−6 ms — effectively neutral** | 20–23% |
+
+The primary product result is therefore **not** that preemption always reduces latency.
+
+Under a **normal WASD workload** it reduced median input-to-first-real-frame latency by approximately 247 ms, while stable/hold input showed essentially no effect. Under an intentionally aggressive 200 ms direction-change workload, latency was approximately unchanged while redundant generation work increased substantially.
+
+Real keyboard hold behavior is less aggressive than the synthetic hold workload: OS/key-repeat events are suppressed upstream, and a 20-second qualification run admitted only the actual direction changes, producing 2 preemptions across 35 chunks with approximately 1.4% wasted work.
+
+Measurements used interleaved A/B arms with fixed VRAM-cleanliness and thermal-pairing gates. Earlier sequential hold/rapid measurements were rejected because GPU thermal drift was large enough to dominate the apparent effect.
+
+Latency terminology is deliberately bounded:
+
+- `input → first real frame` is measured;
+- `input → renderer submit` is measured on the windowed viewer path;
+- physical display presentation completion is **not measured**;
+- renderer submit must not be reported as physical present latency.
+
+These measurements qualify policy v1 as the default interactive policy for the tested RTX 5060 Laptop 8GB / 304×528 / BF16 configuration. They are **not** yet a claim of identical gains across other GPUs, geometries, presets, seeds, or input distributions.
+
+### Presets
+
+| preset | weights | peak reserved | min free | role |
+|---|---|---:|---:|---|
+| `performance` | BF16 | ~7104 MiB | ~821 MiB | lowest validated latency |
+| `lowmem` | weight-only FP8 | ~5846 MiB | ~1161 MiB | lower VRAM, slower |
+
+Low memory is **not** a speed mode on this GPU: the FP8 weight-only path trades capacity for speed.
+
+### Why the preview is not allowed to become authority
+
+LingBot-World is autoregressive. A small numerical change written into persistent state can compound into a different long-horizon world trajectory. This runtime therefore keeps two concepts separate:
+
+- **Preview:** early decoded feedback; never commits persistent world state.
+- **Authoritative frame:** produced by the frozen full path and allowed to advance persistent state only after a fail-closed commit.
+
+Reduced fixed-step authoritative paths were tested and rejected because state divergence increased across subsequent chunks. Short-run backend similarity was also insufficient: long-horizon tests showed that approximate attention/backend changes can drift into a different world trajectory even when single-call similarity is very high.
+
+### Frozen release boundary
+
+The release candidate preserves rejected experiments as part of the engineering record instead of silently reopening them:
+
+- fixed 2-step / 1-step authoritative generation — cumulative state/KV divergence;
+- learned preview head — capacity and cross-scene generalization failure;
+- same-GPU asynchronous preview — no useful overlap;
+- latent-downsample preview — severe quality loss;
+- approximate attention/backend changes as the authoritative default — long-horizon trajectory divergence;
+- exact-path KV shortcutting — the clean state-write is effectively another full model forward, not a memcpy problem.
+
+**Deployment geometry note.** The upstream nominal geometry and this 8 GB deployment geometry are different authorities. All measurements in this community work refer to **304×528** unless explicitly stated otherwise.
+
+Full documentation:
+[`README_RELEASE.md`](README_RELEASE.md) ·
+[`docs/BENCHMARK_CARD.md`](docs/BENCHMARK_CARD.md) ·
+[`docs/RELEASE_1_AUTHORITY.md`](docs/RELEASE_1_AUTHORITY.md) ·
+[`docs/RC_FROZEN.md`](docs/RC_FROZEN.md)
+
+-----
+
 ## 🎬 Demo Gallery
 
 ### LingBot-World-V2-14B-Causal-Pretrain

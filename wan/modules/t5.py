@@ -435,9 +435,14 @@ def _t5(name,
     else:
         model_cls = T5Model
 
-    # init model
-    with torch.device(device):
-        model = model_cls(**kwargs)
+    # init model (allocate directly in target dtype to avoid fp32 peak)
+    _prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with torch.device(device):
+            model = model_cls(**kwargs)
+    finally:
+        torch.set_default_dtype(_prev_dtype)
 
     # set device
     model = model.to(dtype=dtype, device=device)
@@ -484,14 +489,19 @@ class T5EncoderModel:
         self.checkpoint_path = checkpoint_path
         self.tokenizer_path = tokenizer_path
 
-        # init model
-        model = umt5_xxl(
-            encoder_only=True,
-            return_tokenizer=False,
-            dtype=dtype,
-            device=device).eval().requires_grad_(False)
-        logging.info(f'loading {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        # init model on meta device, then assign mmap-backed weights directly.
+        # Avoids a full anonymous bf16 allocation (~10.6 GiB) so the encoder
+        # fits on low-RAM hosts: weights stay file-backed and evictable.
+        with torch.device('meta'):
+            model = umt5_xxl(
+                encoder_only=True,
+                return_tokenizer=False,
+                dtype=dtype,
+                device='meta').eval().requires_grad_(False)
+        logging.info(f'loading {checkpoint_path} (mmap/assign)')
+        _mmap_state = torch.load(checkpoint_path, map_location='cpu', mmap=True)
+        model.load_state_dict(_mmap_state, assign=True)
+        self._mmap_state = _mmap_state
         self.model = model
         if shard_fn is not None:
             self.model = shard_fn(self.model, sync_module_states=False)

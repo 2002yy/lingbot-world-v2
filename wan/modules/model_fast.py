@@ -5,6 +5,74 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as torch_F
+
+# Cache the camera-injection projections (see CausalWanAttentionBlock.forward).
+# They are pure functions of c2ws_plucker_emb, which is constant within a chunk
+# while the block runs 4x per chunk, so ~75% of the work is recomputation.
+# Caching is bit-exact, so this is ON by default; LINGBOT_CAM_CACHE=0 disables.
+import os as _os
+_CAM_CACHE = _os.environ.get("LINGBOT_CAM_CACHE", "1") not in ("0", "false", "False")
+
+# Camera-cache epoch. The cache key cannot be derived from the input tensor:
+# WanModelFast.forward rebuilds `c2ws_plucker_emb` on EVERY forward (rearrange ->
+# cat -> patch_embedding -> add), so a new tensor with a different data_ptr is
+# passed each time and identity-based keys never hit. `current_start` alone is
+# also insufficient, because pipe.prewarm() runs a dummy forward at
+# current_start 0 with dummy camera values and would poison the real
+# generation's chunk 0.
+#
+# So the pipeline bumps an explicit epoch at the start of prewarm() and of every
+# generate(); the key is (epoch, current_start), which is stable across the
+# forwards within a chunk and distinct across prewarm / generations.
+_CAM_EPOCH = [0]
+
+
+def bump_cam_epoch():
+    """Invalidate all camera caches. Call at the start of prewarm/generate."""
+    _CAM_EPOCH[0] += 1
+    return _CAM_EPOCH[0]
+
+
+# ---------------------------------------------------------------------------
+# P2d-1b: replace `a + b*c` with torch.addcmul(a, b, c).
+#
+# addcmul is a single fused ATen op, so it removes a kernel boundary and the
+# intermediate tensor without changing the floating-point evaluation order --
+# unlike torch.compile, which does change it (measured: 0/48 bit-exact vs 48/48
+# for addcmul). Each flag is opt-in and each chain was verified bit-exact on the
+# model's ACTUAL expression before being wired up (p2d1b1_expr.py):
+#
+#   mod1  n1.float()*(1+e1) + e0   ->  addcmul(e0, n1.float(), 1+e1)
+#   mod2  n2.float()*(1+e4) + e3   ->  addcmul(e3, n2.float(), 1+e4)
+#   resA  x + y*e2                 ->  addcmul(x, y, e2)
+#   resB  x + y*e5                 ->  addcmul(x, y, e5)
+#   cam   (1+cs)*x + ct            ->  addcmul(ct, x, 1+cs)
+#
+# NOTE on a trap already hit once: an earlier probe tested n1 + (1+e1)*e0 for
+# mod1 and x + (1+cs)*ct for cam -- operands swapped relative to the real lines
+# -- and reported cam as NOT exact. Retesting the real expressions gave 0.000e+00
+# on all five. Always mirror the model's operand order, not the intended algebra.
+_FUSE_MOD = _os.environ.get("LINGBOT_FUSE_MOD", "0") not in ("0", "false", "False")
+_FUSE_RES = _os.environ.get("LINGBOT_FUSE_RES", "0") not in ("0", "false", "False")
+_FUSE_CAM = _os.environ.get("LINGBOT_FUSE_CAM", "0") not in ("0", "false", "False")
+
+
+def fuse_flags():
+    return {"mod": _FUSE_MOD, "res": _FUSE_RES, "cam": _FUSE_CAM}
+
+
+def set_fuse(mod=None, res=None, cam=None):
+    """Runtime override, so one process can A/B the arms without reimporting."""
+    global _FUSE_MOD, _FUSE_RES, _FUSE_CAM
+    if mod is not None:
+        _FUSE_MOD = mod
+    if res is not None:
+        _FUSE_RES = res
+    if cam is not None:
+        _FUSE_CAM = cam
+    return fuse_flags()
+
+
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from wan.modules.attention import attention
@@ -18,6 +86,81 @@ from wan.modules.model import (
 
 from .attention import flash_attention
 
+# Optional SageAttention 2.2 backend, opt-in via LINGBOT_SAGE=1.
+# sage_backend re-exports drop-in replacements for `attention` and
+# `flash_attention` that forward to the originals for any shape SageAttention
+# cannot handle (varlen/padded, causal, sliding window, non-contiguous), so
+# enabling it cannot silently change semantics for an unsupported shape.
+# Measured on this machine SageAttention beats flash-attn 2 at every shape this
+# model actually uses; see wan/modules/sage_backend.py for the numbers.
+from .sage_backend import attention as attention
+from .sage_backend import flash_attention as flash_attention
+
+
+# ---------------------------------------------------------------------------
+# RoPE setup caches (bit-exact; see docs/ROPE_ATTRIBUTION.md).
+#
+# `grid_sizes.tolist()` is a CUDA->CPU hard sync. On its own it costs ~34 us, but
+# removing it from the whole call is worth ~236 us/call (-52.7%) because it blocks
+# the CPU behind the GPU queue and serialises the async pipeline. The geometry is
+# constant for a whole rollout, so the list form is cached on tensor identity.
+#
+# The `freqs_i` table (three expand()s plus a cat, forcing a real 0.96 MB
+# allocation) is rebuilt on every one of the 240 calls per chunk although it only
+# depends on (freqs, c, start_frame, f, h, w). Within a chunk start_frame is
+# constant across the four forwards, so the cache is hit almost every time.
+# Bounded, and validated with an identity check so a recycled id() cannot serve a
+# stale table.
+_ROPE_GRID_CACHE = {}
+_ROPE_TABLE_CACHE = {}
+_ROPE_TABLE_MAX = 8
+
+# LINGBOT_ROPE_CACHE=1 enables it. Defaults to 0 until the rollout gate passes,
+# so that merely updating the tree cannot silently change generated worlds.
+_ROPE_CACHE = _os.environ.get("LINGBOT_ROPE_CACHE", "0") not in (
+    "0", "false", "False")
+
+
+def set_rope_cache(enabled):
+    """Runtime override, so one process can A/B the arms without reimporting."""
+    global _ROPE_CACHE
+    _ROPE_CACHE = bool(enabled)
+    if not _ROPE_CACHE:
+        _ROPE_GRID_CACHE.clear()
+        _ROPE_TABLE_CACHE.clear()
+    return _ROPE_CACHE
+
+
+def rope_cache_stats():
+    return {"grid_entries": len(_ROPE_GRID_CACHE),
+            "table_entries": len(_ROPE_TABLE_CACHE)}
+
+
+def _rope_grid_list(grid_sizes):
+    ent = _ROPE_GRID_CACHE.get(id(grid_sizes))
+    if ent is not None and ent[0] is grid_sizes:
+        return ent[1]
+    lst = grid_sizes.tolist()
+    _ROPE_GRID_CACHE[id(grid_sizes)] = (grid_sizes, lst)
+    return lst
+
+
+def _rope_freqs_i(freqs_split, freqs, c, start_frame, f, h, w):
+    key = (id(freqs), c, start_frame, f, h, w)
+    ent = _ROPE_TABLE_CACHE.get(key)
+    if ent is not None and ent[0] is freqs:
+        return ent[1]
+    table = torch.cat([
+        freqs_split[0][start_frame:start_frame + f].view(f, 1, 1, -1)
+        .expand(f, h, w, -1),
+        freqs_split[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+        freqs_split[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+    ], dim=-1).reshape(f * h * w, 1, -1)
+    if len(_ROPE_TABLE_CACHE) >= _ROPE_TABLE_MAX:
+        _ROPE_TABLE_CACHE.clear()
+    _ROPE_TABLE_CACHE[key] = (freqs, table)
+    return table
+
 
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     n, c = x.size(2), x.size(3) // 2
@@ -28,18 +171,24 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     # loop over samples
     output = []
 
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+    grid_list = _rope_grid_list(grid_sizes) if _ROPE_CACHE \
+        else grid_sizes.tolist()
+
+    for i, (f, h, w) in enumerate(grid_list):
         seq_len = f * h * w
 
         # precompute multipliers
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
             seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][start_frame:start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-            dim=-1).reshape(seq_len, 1, -1)
+        if _ROPE_CACHE:
+            freqs_i = _rope_freqs_i(freqs, freqs, c, start_frame, f, h, w)
+        else:
+            freqs_i = torch.cat([
+                freqs[0][start_frame:start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+            ],
+                dim=-1).reshape(seq_len, 1, -1)
 
         # apply rotary embedding
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
@@ -121,6 +270,16 @@ class CausalWanSelfAttention(nn.Module):
         # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
         kv_cache_size = kv_cache["k"].shape[1]
         num_new_tokens = roped_query.shape[1]
+        # Cache position state. Stored as plain Python ints in the causal-fast
+        # path (see `_initialize_self_kv_cache`): reading them used to be
+        # `.item()` — a CPU<->GPU sync on EVERY layer, EVERY one of the 4
+        # forwards per chunk — and writing them used to be `.fill_()`, an
+        # in-place mutation that blocks CUDA Graph capture. Tensor storage is
+        # still accepted for backwards compatibility with other callers.
+        _gei_raw = kv_cache["global_end_index"]
+        _lei_raw = kv_cache["local_end_index"]
+        _gei = _gei_raw.item() if torch.is_tensor(_gei_raw) else _gei_raw
+        _lei = _lei_raw.item() if torch.is_tensor(_lei_raw) else _lei_raw
         if self.local_attn_size == -1:
             # Fast path (no eviction possible — cache is global). Both
             # indices start at 0 and advance identically every forward, so
@@ -130,26 +289,24 @@ class CausalWanSelfAttention(nn.Module):
             local_start_index = current_start
             kv_cache["k"][:, local_start_index:local_end_index] = roped_key
             kv_cache["v"][:, local_start_index:local_end_index] = v
-        elif (current_end > kv_cache["global_end_index"].item()) and (
-                num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
+        elif (current_end > _gei) and (num_new_tokens + _lei > kv_cache_size):
             # Calculate the number of new tokens added in this step
             # Shift existing cache content left to discard oldest tokens
             # Clone the source slice to avoid overlapping memory error
-            num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-            num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+            num_evicted_tokens = num_new_tokens + _lei - kv_cache_size
+            num_rolled_tokens = _lei - num_evicted_tokens - sink_tokens
             kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
                 kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
                 kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             # Insert the new keys/values at the end
-            local_end_index = kv_cache["local_end_index"].item() + current_end - \
-                kv_cache["global_end_index"].item() - num_evicted_tokens
+            local_end_index = _lei + current_end - _gei - num_evicted_tokens
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"][:, local_start_index:local_end_index] = roped_key
             kv_cache["v"][:, local_start_index:local_end_index] = v
         else:
             # Assign new keys/values directly up to current_end
-            local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+            local_end_index = _lei + current_end - _gei
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"][:, local_start_index:local_end_index] = roped_key
             kv_cache["v"][:, local_start_index:local_end_index] = v
@@ -158,8 +315,12 @@ class CausalWanSelfAttention(nn.Module):
         v_cache = kv_cache["v"][:, max(0, local_end_index - max_attention_size):local_end_index]
         x = attention(roped_query, k_cache, v_cache)
 
-        kv_cache["global_end_index"].fill_(current_end)
-        kv_cache["local_end_index"].fill_(local_end_index)
+        if torch.is_tensor(_gei_raw):
+            _gei_raw.fill_(current_end)
+            _lei_raw.fill_(local_end_index)
+        else:
+            kv_cache["global_end_index"] = current_end
+            kv_cache["local_end_index"] = local_end_index
 
         # output
         x = x.flatten(2)
@@ -187,12 +348,21 @@ class WanCrossAttention(WanSelfAttention):
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
 
         if crossattn_cache is not None:
+            # `is_init` is a plain Python bool in the causal-fast path (see
+            # `_initialize_crossattn_cache_pretrain`, which already used a bool).
+            # Reading it used to be `.item()` (CPU<->GPU sync per layer per
+            # forward) and writing it used to be `.fill_()` (in-place mutation
+            # that blocks CUDA Graph capture). Tensor storage is still accepted.
+            _isinit = crossattn_cache["is_init"]
             if cross_attn_first_call is None:
-                is_first = crossattn_cache["is_init"].item() == 0
+                is_first = (_isinit.item() == 0) if torch.is_tensor(_isinit) else (not _isinit)
             else:
                 is_first = cross_attn_first_call
             if is_first:
-                crossattn_cache["is_init"].fill_(1)
+                if torch.is_tensor(crossattn_cache["is_init"]):
+                    crossattn_cache["is_init"].fill_(1)
+                else:
+                    crossattn_cache["is_init"] = True
                 k = self.norm_k(self.k(context)).view(b, -1, n, d)
                 v = self.v(context).view(b, -1, n, d)
                 crossattn_cache["k"].copy_(k)
@@ -288,21 +458,52 @@ class CausalWanAttentionBlock(nn.Module):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
         assert e[0].dtype == torch.float32
         # self-attention
+        if _FUSE_MOD:
+            _q_in = torch.addcmul(e[0].squeeze(2), self.norm1(x).float(),
+                                  1 + e[1].squeeze(2))
+        else:
+            _q_in = self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
         y = self.self_attn(
-            self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
+            _q_in,
             seq_lens, grid_sizes, freqs, kv_cache, current_start, max_attention_size,
             frame_seqlen=frame_seqlen, seq_lens_int=seq_lens_int)
         with torch.amp.autocast('cuda', dtype=torch.float32):
-            x = x + y * e[2].squeeze(2)
+            if _FUSE_RES:
+                x = torch.addcmul(x, y, e[2].squeeze(2))
+            else:
+                x = x + y * e[2].squeeze(2)
 
         # cam injection (only if dit_cond_dict is provided and contains c2ws_plucker_emb)
         if dit_cond_dict is not None and "c2ws_plucker_emb" in dit_cond_dict:
             c2ws_plucker_emb = dit_cond_dict["c2ws_plucker_emb"]
-            c2ws_hidden_states = self.cam_injector_layer2(torch_F.silu(self.cam_injector_layer1(c2ws_plucker_emb)))
-            c2ws_hidden_states = c2ws_hidden_states + c2ws_plucker_emb
-            cam_scale = self.cam_scale_layer(c2ws_hidden_states)
-            cam_shift = self.cam_shift_layer(c2ws_hidden_states)
-            x = (1.0 + cam_scale) * x + cam_shift
+            # The four camera projections are pure functions of
+            # `c2ws_plucker_emb`, which is CONSTANT within a chunk while this
+            # block forward runs 4x per chunk (3 denoise steps + 1 KV update).
+            # Measured: cam.* costs 56.2 ms/chunk of which ~75% is
+            # recomputation. Caching is bit-exact -- same input, same weights,
+            # identical output -- so it needs no rollout gate and is enabled by
+            # default. Set LINGBOT_CAM_CACHE=0 to disable.
+            # Key = (epoch, position). Stable across the 4 forwards of a chunk
+            # (same epoch, same current_start) and distinct across prewarm and
+            # successive generate() calls. See _CAM_EPOCH above for why neither
+            # the tensor identity nor current_start alone is sufficient.
+            key = (_CAM_EPOCH[0], current_start)
+            cache = getattr(self, "_cam_cache", None)
+            if _CAM_CACHE and cache is not None and cache[0] == key:
+                cam_scale, cam_shift = cache[1], cache[2]
+            else:
+                c2ws_hidden_states = self.cam_injector_layer2(
+                    torch_F.silu(self.cam_injector_layer1(c2ws_plucker_emb)))
+                c2ws_hidden_states = c2ws_hidden_states + c2ws_plucker_emb
+                cam_scale = self.cam_scale_layer(c2ws_hidden_states)
+                cam_shift = self.cam_shift_layer(c2ws_hidden_states)
+                if _CAM_CACHE:
+                    self._cam_cache = (key, cam_scale, cam_shift)
+            # this part still runs every forward: x differs per denoise step
+            if _FUSE_CAM:
+                x = torch.addcmul(cam_shift, x, 1.0 + cam_scale)
+            else:
+                x = (1.0 + cam_scale) * x + cam_shift
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e, crossattn_cache=None,
@@ -310,10 +511,17 @@ class CausalWanAttentionBlock(nn.Module):
             x = x + self.cross_attn(self.norm3(x), context, context_lens,
                                     crossattn_cache=crossattn_cache,
                                     cross_attn_first_call=cross_attn_first_call)
-            y = self.ffn(
-                self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
+            if _FUSE_MOD:
+                _f_in = torch.addcmul(e[3].squeeze(2), self.norm2(x).float(),
+                                      1 + e[4].squeeze(2))
+            else:
+                _f_in = self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)
+            y = self.ffn(_f_in)
             with torch.amp.autocast('cuda', dtype=torch.float32):
-                x = x + y * e[5].squeeze(2)
+                if _FUSE_RES:
+                    x = torch.addcmul(x, y, e[5].squeeze(2))
+                else:
+                    x = x + y * e[5].squeeze(2)
             return x
 
         x = cross_attn_ffn(x, context, context_lens, e, crossattn_cache,

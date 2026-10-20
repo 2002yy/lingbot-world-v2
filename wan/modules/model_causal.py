@@ -160,26 +160,33 @@ class SelfAttention_KVCache(nn.Module):
         # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
         kv_cache_size = kv_cache["k"].shape[1]
         num_new_tokens = roped_query.shape[1]
-        if self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and (
-                num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
+        # Cache position state is a plain Python int in the causal-fast path
+        # (see `_initialize_self_kv_cache`); tensor storage is accepted for
+        # backwards compatibility. Kept tolerant here so this model cannot
+        # break if it is ever handed the int-based cache.
+        _gei_raw = kv_cache["global_end_index"]
+        _lei_raw = kv_cache["local_end_index"]
+        _gei = _gei_raw.item() if torch.is_tensor(_gei_raw) else _gei_raw
+        _lei = _lei_raw.item() if torch.is_tensor(_lei_raw) else _lei_raw
+        if self.local_attn_size != -1 and (current_end > _gei) and (
+                num_new_tokens + _lei > kv_cache_size):
             # Calculate the number of new tokens added in this step
             # Shift existing cache content left to discard oldest tokens
             # Clone the source slice to avoid overlapping memory error
-            num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-            num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+            num_evicted_tokens = num_new_tokens + _lei - kv_cache_size
+            num_rolled_tokens = _lei - num_evicted_tokens - sink_tokens
             kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
                 kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
                 kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             # Insert the new keys/values at the end
-            local_end_index = kv_cache["local_end_index"].item() + current_end - \
-                kv_cache["global_end_index"].item() - num_evicted_tokens
+            local_end_index = _lei + current_end - _gei - num_evicted_tokens
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"][:, local_start_index:local_end_index] = roped_key
             kv_cache["v"][:, local_start_index:local_end_index] = v
         else:
             # Assign new keys/values directly up to current_end
-            local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+            local_end_index = _lei + current_end - _gei
             local_start_index = local_end_index - num_new_tokens
             kv_cache["k"][:, local_start_index:local_end_index] = roped_key
             kv_cache["v"][:, local_start_index:local_end_index] = v
@@ -188,8 +195,12 @@ class SelfAttention_KVCache(nn.Module):
         v_cache = kv_cache["v"][:, max(0, local_end_index - max_attention_size):local_end_index]
         x = attention(roped_query, k_cache, v_cache)    
 
-        kv_cache["global_end_index"].fill_(current_end)
-        kv_cache["local_end_index"].fill_(local_end_index)
+        if torch.is_tensor(_gei_raw):
+            _gei_raw.fill_(current_end)
+            _lei_raw.fill_(local_end_index)
+        else:
+            kv_cache["global_end_index"] = current_end
+            kv_cache["local_end_index"] = local_end_index
         
         # output
         x = x.flatten(2)

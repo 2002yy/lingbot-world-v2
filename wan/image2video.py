@@ -142,9 +142,25 @@ def load_dit_model(model_cls, checkpoint_dir, subfolder, config, torch_dtype,
         f"config.json not found in {dit_dir}; building {model_cls.__name__} "
         "from the task config and loading safetensors weights."
     )
-    model = model_cls(**_dit_kwargs_from_config(config, extra))
+    _prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch_dtype)
+    try:
+        model = model_cls(**_dit_kwargs_from_config(config, extra))
+    finally:
+        torch.set_default_dtype(_prev_dtype)
+    from safetensors.torch import load_file
+    index_path = os.path.join(dit_dir, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path) as f:
+            index = json.load(f)
+        for shard in sorted(set(index["weight_map"].values())):
+            sd = load_file(os.path.join(dit_dir, shard))
+            model.load_state_dict(sd, strict=False)
+            del sd
+        return model.to(dtype=torch_dtype)
     state = _load_safetensors_state_dict(dit_dir)
     missing, unexpected = model.load_state_dict(state, strict=False)
+    del state
     if missing:
         logging.warning(f"Missing keys when loading DiT: {missing}")
     if unexpected:
@@ -245,7 +261,8 @@ class WanI2VCausal:
         self.vae = Wan2_1_VAE(
             vae_pth=_resolve_asset_path(
                 config.vae_checkpoint, checkpoint_dir, assets_dir),
-            device=self.device)
+            device=self.device,
+            dtype=torch.bfloat16)
 
         if self.infer_mode == "causal_fast":
             self.model = load_dit_model(
@@ -274,6 +291,41 @@ class WanI2VCausal:
             shard_fn=shard_fn,
             convert_model_dtype=convert_model_dtype).to(self.device)
 
+        # Weight storage mode.
+        #
+        # P2b measured the FP8 weight-only path at +356 ms per chunk (22.8%)
+        # against original bf16 weights, for 1.30 GiB of VRAM. So FP8 is a
+        # CAPACITY lever, not a speed lever: it is slower, not faster. The name
+        # below says so explicitly rather than calling it "fp8 fast".
+        #
+        #   LINGBOT_WEIGHT_MODE=bf16          original weights, fastest, ~6.6 GiB
+        #   LINGBOT_WEIGHT_MODE=fp8_lowmem    weight-only FP8, ~5.3 GiB
+        #
+        # The default is still fp8_lowmem: the quality gate has passed
+        # (docs/P2B_QUALITY_GATE.md) but the full interactive 8 GB memory gate
+        # has not run yet, and the flip is deliberately the last step.
+        #
+        # LINGBOT_FP8 is honoured as a legacy alias so every existing script and
+        # harness keeps working.
+        _wmode = os.getenv("LINGBOT_WEIGHT_MODE")
+        if _wmode is None:
+            _wmode = "fp8_lowmem" if os.getenv("LINGBOT_FP8", "0") == "1" \
+                else "bf16"
+        if _wmode not in ("bf16", "fp8_lowmem"):
+            raise ValueError(
+                f"LINGBOT_WEIGHT_MODE must be 'bf16' or 'fp8_lowmem', got "
+                f"{_wmode!r}")
+        if _wmode == "fp8_lowmem":
+            from lingbot_fp8 import apply_selective_fp8
+            apply_selective_fp8(self.model)
+
+        # P2a: optional rowwise-FP8 FFN up-projection. Runs after the
+        # weight-only pass, which skips ffn.0 when this lever is enabled so the
+        # rowwise quantisation sees original bf16 weights. Changes the numerical
+        # path -> fast-mode class.
+        from wan import perf_mode as _pm
+        _pm.apply_ffn0_fp8(self.model)
+
         self.scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=self.num_train_timesteps,
             shift=1,
@@ -297,6 +349,32 @@ class WanI2VCausal:
         # Passed into model.forward as `cross_attn_first_call` to skip the
         # crossattn_cache["is_init"].item() sync inside WanCrossAttention.
         self._cross_attn_initialized: bool = False
+
+        # Store KV-cache position bookkeeping (global_end_index /
+        # local_end_index / is_init) as plain Python ints/bools rather than CUDA
+        # tensors. Measured ~10% faster per chunk, bit-exact, because the tensor
+        # form forced a .item() CPU<->GPU sync per layer per forward.
+        #
+        # Scoped to the causal-fast, single-GPU path: the sequence-parallel
+        # attention kernels still read these through `.item()`. `model_fast.py`
+        # and `model_causal.py` accept either form, so this only decides what we
+        # write, never how it is read.
+        self._py_cache_meta: bool = (
+            infer_mode == "causal_fast" and self.sp_size == 1)
+
+        # Apply the performance preset LAST, so every earlier lookup on the
+        # original model (config, dtype, module shape) has already happened and
+        # torch.compile's wrapper cannot interfere with them.
+        #
+        #   LINGBOT_MODE=repro (default) -> fa2 + eager, exact trajectory
+        #   LINGBOT_MODE=fast            -> hybrid + compile, ~7% faster but the
+        #                                   recurrent rollout diverges from the
+        #                                   fa2 trajectory after ~32 chunks
+        # See wan/perf_mode.py for the measurements behind that split.
+        from wan import perf_mode
+        self.perf_mode = perf_mode.resolve()
+        self.model = perf_mode.apply(self.model, self.perf_mode,
+                                     log=lambda m: print(m, flush=True))
 
     def clear_text_cache(self):
         """Drop all cached T5 prompt embeddings. Frees ~4 MB per entry."""
@@ -345,6 +423,20 @@ class WanI2VCausal:
         if getattr(self, "_warmed", False):
             return
 
+        # Invalidate the camera-injection cache before this dummy forward. It
+        # runs at current_start 0 with dummy camera values, and without a new
+        # epoch it would poison the real generation's chunk 0 -- silently when
+        # the shapes match, with a tensor-size error when they do not.
+        from wan.modules.model_fast import bump_cam_epoch
+        bump_cam_epoch()
+
+        # NOTE: no _restore_device() here. prewarm() has no offload_model
+        # argument and is the first call after construction, when the model is
+        # necessarily already resident. An earlier version of the offload fix
+        # wired the restore into this site too and raised NameError on every
+        # prewarm() -- caught immediately by the next test, which is the point
+        # of running one after every change.
+
         cfg = self.config
 
         # Match generate()'s shape derivation exactly.
@@ -382,12 +474,14 @@ class WanI2VCausal:
             num_layers=cfg.num_layers,
             shape=[1, kv_size, local_num_heads, head_dim],
             dtype=transformer_dtype,
-            device=self.device)
+            device=self.device,
+            python_metadata=self._py_cache_meta)
         warmup_cross_kv = self._initialize_crossattn_cache(
             num_layers=cfg.num_layers,
             shape=[1, text_seq_len, cfg.num_heads, head_dim],
             dtype=transformer_dtype,
-            device=self.device)
+            device=self.device,
+            python_metadata=self._py_cache_meta)
 
         # `y` is concat([msk_4ch, vae_latent_16ch]) → 20 channels; combined
         # with latent's 16 ch at patch-embed concat, the DiT sees 36 ch in.
@@ -551,6 +645,57 @@ class WanI2VCausal:
             max_sequence_length=max_sequence_length,
             max_attention_size=max_attention_size)
 
+
+
+    def _condition_latent(self, img, F, h, w):
+        """Build the condition latent y for a clip of [real frame, then zeros].
+
+        The streamed encoder is the default. It is bit-identical to the
+        whole-clip path (M1-0: condition y hash and final output hash match
+        exactly, at 81 and 249 frames), it removes a length-dependent OOM cliff
+        (at 501 and 777 frames the whole-clip path cannot complete even the first
+        request while the streamed path can), and G4-hotpath showed it does not
+        contaminate the following hot path: DiT, decode and combined latency all
+        land within +-0.3% under ABBA interleaving, with no allocator creep and no
+        event/state change.
+
+        LINGBOT_STREAM_ENCODE=0 restores the whole-clip path, kept for debugging
+        and for reproducing pre-M1-2 numbers.
+        """
+        if os.getenv("LINGBOT_STREAM_ENCODE", "1") == "1":
+            img_rs = torch.nn.functional.interpolate(
+                img[None].cpu(), size=(h, w), mode='bicubic').transpose(0, 1)
+            return self.vae.encode_streamed(img_rs, F, h, w)
+        return self.vae.encode([
+            torch.concat([
+                torch.nn.functional.interpolate(
+                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
+                        0, 1),
+                torch.zeros(3, F - 1, h, w)
+            ], dim=1).to(self.device)
+        ])[0]
+
+    def _restore_device(self, offload_model):
+        """Return the DiT to the execution device if a previous request offloaded it.
+
+        offload_model=True calls self.model.cpu() at the end of a generation but
+        the next request never moves it back, so the second request fails with a
+        CUDA/CPU dtype mismatch. Restoring here keeps the cost at once per
+        request rather than once per chunk, and is a no-op when the model is
+        already resident.
+        """
+        if not offload_model:
+            return 0.0
+        import time as _t
+        t0 = _t.perf_counter()
+        try:
+            p = next(self.model.parameters())
+            if p.device != self.device:
+                self.model.to(self.device)
+        except StopIteration:
+            pass
+        return _t.perf_counter() - t0
+
     def _generate_causal_fast(self,
                               input_prompt,
                               img,
@@ -605,6 +750,21 @@ class WanI2VCausal:
             batch_size = 1
         
         assert action_path is not None, "action_path is required"
+
+        # New camera-cache epoch: chunk 0 of a fresh generation reuses
+        # current_start == 0, so without this the previous generation's (or
+        # prewarm's) entry would be reused. See wan/modules/model_fast.py.
+        from wan.modules.model_fast import bump_cam_epoch
+        bump_cam_epoch()
+
+        # A previous request may have offloaded the DiT to the CPU; bring it back
+        # before any forward. See _restore_device. Measured cost is reported so
+        # the restore cannot silently become a hot-path tax.
+        _restore_s = self._restore_device(offload_model)
+        if _restore_s > 0.001:
+            logging.info(f'[restore] DiT back to {self.device} in '
+                         f'{_restore_s*1000:.1f} ms')
+
         c2ws = np.load(os.path.join(action_path, "poses.npy")) # opencv coordinate
         len_c2ws = ((len(c2ws) - 1) // 4) * 4 + 1
         frame_num = ((frame_num - 1) // 4) * 4 + 1
@@ -693,11 +853,19 @@ class WanI2VCausal:
         len_c2ws = len(c2ws)
         len_c2ws_ = int((len_c2ws - 1) // 4) + 1
         len_c2ws_ = int(len_c2ws_ - (len_c2ws_ % chunk_size))
+        # Camera-conditioning sampling grid. The model conditions on one pose per
+        # latent (= 4 output frames); by default the pose is taken at the START of
+        # the window, which makes the generated motion trail the intended
+        # trajectory by ~2 frames (measured). LINGBOT_POSE_OFFSET shifts the grid
+        # in source frames to compensate.
+        _pose_off = int(os.getenv("LINGBOT_POSE_OFFSET", "0"))
+        _tgt = np.linspace(0, len_c2ws - 1, len_c2ws_) + _pose_off
+        _tgt = np.clip(_tgt, 0, len_c2ws - 1)
         c2ws_infer = interpolate_camera_poses(
             src_indices=np.linspace(0, len_c2ws - 1, len_c2ws),
             src_rot_mat=c2ws[:, :3, :3],
             src_trans_vec=c2ws[:, :3, 3],
-            tgt_indices=np.linspace(0, len_c2ws - 1, len_c2ws_),
+            tgt_indices=_tgt,
         )
         c2ws_infer = compute_relative_poses(c2ws_infer, framewise=True)
         Ks = Ks.repeat(len(c2ws_infer), 1)
@@ -726,15 +894,7 @@ class WanI2VCausal:
             wasd_action_tensor = rearrange(wasd_action_tensor, 'b (f h w) c -> b c f h w', f=lat_f, h=lat_h, w=lat_w).to(self.param_dtype)
             c2ws_plucker_emb = torch.cat([c2ws_plucker_emb, wasd_action_tensor], dim=1)
 
-        y = self.vae.encode([
-            torch.concat([
-                torch.nn.functional.interpolate(
-                    img[None].cpu(), size=(h, w), mode='bicubic').transpose(
-                        0, 1),
-                torch.zeros(3, F - 1, h, w)
-            ],
-                         dim=1).to(self.device)
-        ])[0]
+        y = self._condition_latent(img, F, h, w)
         y = torch.concat([msk, y])
 
         @contextmanager
@@ -757,12 +917,14 @@ class WanI2VCausal:
         self_kv_cache = self._initialize_self_kv_cache(num_layers=model_args.num_layers,
                                                        shape=self_kv_shape,
                                                        dtype=transformer_dtype,
-                                                       device=self.device)
+                                                       device=self.device,
+                                                       python_metadata=self._py_cache_meta)
         cross_kv_shape = [batch_size, max_sequence_length, model_args.num_heads, head_dim]
         cross_kv_cache = self._initialize_crossattn_cache(num_layers=model_args.num_layers,
                                                           shape=cross_kv_shape,
                                                           dtype=transformer_dtype,
-                                                          device=self.device)
+                                                          device=self.device,
+                                                          python_metadata=self._py_cache_meta)
         # evaluation mode
         with (
                 torch.amp.autocast('cuda', dtype=self.param_dtype),
@@ -977,15 +1139,7 @@ class WanI2VCausal:
                 f=lat_f, h=lat_h, w=lat_w,
             ).to(self.param_dtype)
 
-        y = self.vae.encode([
-            torch.concat(
-                [
-                    torch.nn.functional.interpolate(img[None].cpu(), size=(h, w), mode='bicubic').transpose(0, 1),
-                    torch.zeros(3, F - 1, h, w)
-                ], 
-                dim=1,
-            ).to(self.device)
-        ])[0]
+        y = self._condition_latent(img, F, h, w)
         y = torch.concat([msk, y])
 
         @contextmanager
@@ -1119,32 +1273,59 @@ class WanI2VCausal:
 
         return videos[0] if self.rank == 0 else None
 
-    def _initialize_self_kv_cache(self, num_layers, shape, dtype, device):
+    def _initialize_self_kv_cache(self, num_layers, shape, dtype, device,
+                                 python_metadata=False):
         """
         Initialize a Per-GPU KV cache for the SelfAttn.
+
+        `python_metadata=True` stores `global_end_index` / `local_end_index` as
+        plain Python ints instead of CUDA tensors. They are pure Python
+        bookkeeping: `current_start` (the only other position input) is already
+        an int, so nothing in the update needs a device tensor. As tensors they
+        cost a CPU<->GPU sync per layer per forward (`.item()`) and required an
+        in-place `.fill_()` write-back. Both are pure overhead here; the
+        `.fill_()` is also an in-place mutation that interacts badly with CUDA
+        Graph capture.
+
+        Defaults to False so the contract of existing callers (including the
+        sequence-parallel path, which reads these through `.item()`) is
+        unchanged. `model_fast.py` and `model_causal.py` accept either form.
         """
         self_kv_cache = []
         for _ in range(num_layers):
+            if python_metadata:
+                gei, lei = 0, 0
+            else:
+                gei = torch.tensor([0], dtype=torch.long, device=device)
+                lei = torch.tensor([0], dtype=torch.long, device=device)
             self_kv_cache.append({
                 'k': torch.zeros(shape, dtype=dtype, device=device),
                 'v': torch.zeros(shape, dtype=dtype, device=device),
-                'global_end_index': torch.tensor([0], dtype=torch.long, device=device),
-                'local_end_index': torch.tensor([0], dtype=torch.long, device=device)
+                'global_end_index': gei,
+                'local_end_index': lei
             })
 
         return self_kv_cache
 
 
-    def _initialize_crossattn_cache(self, num_layers, shape, dtype, device):
+    def _initialize_crossattn_cache(self, num_layers, shape, dtype, device,
+                                   python_metadata=False):
         """
         Initialize a per-GPU cross-attention cache.
+
+        `python_metadata=True` stores `is_init` as a plain Python bool (the same
+        convention `_initialize_crossattn_cache_pretrain` already documents).
+        As a CUDA tensor it forced a `.item()` sync per layer per forward, and
+        the `.fill_()` write-back blocked CUDA Graph capture. Defaults to False
+        to leave other callers' contract unchanged.
         """
         crossattn_cache = []
         for _ in range(num_layers):
             crossattn_cache.append({
                 'k': torch.zeros(shape, dtype=dtype, device=device),
                 'v': torch.zeros(shape, dtype=dtype, device=device),
-                'is_init': torch.tensor(0, dtype=torch.int32, device=device),
+                'is_init': False if python_metadata
+                          else torch.tensor(0, dtype=torch.int32, device=device),
             })
 
         return crossattn_cache
