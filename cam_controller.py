@@ -22,8 +22,6 @@ import shutil
 
 import numpy as np
 
-from wan.utils.cam_utils import interpolate_camera_poses
-
 
 def so3_exp(w):
     """Rodrigues: w (rad, 3) -> R (3,3)."""
@@ -133,6 +131,10 @@ class CameraController:
 
     def to_frames(self):
         """Upsample latent-rate poses to the frame rate the pipeline expects."""
+        # Control reduction is CPU-only. Importing wan eagerly initializes CUDA
+        # through its model package, although stepping never needs interpolation.
+        from wan.utils.cam_utils import interpolate_camera_poses
+
         P = np.stack(self.poses)  # [L,4,4]
         L = len(P)
         N = 4 * (L - 1) + 1
