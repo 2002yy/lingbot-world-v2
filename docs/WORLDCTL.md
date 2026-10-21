@@ -2,6 +2,25 @@
 
 ## 当前交接
 
+2026-10-22：两个功能片已合入main：PR #3（status/doctor）head
+fac4d86d177ccaadca83e5f32749ea46b2a669c3，merge7249f4b31070126f681c410d73fc5899fabc3219；
+PR #2（experiment list/plan）head3cff7afcfcc0a6df52416c913727c555ba89e7c8，
+merge2f378cf76cc408129e5349ac5e63dfd6297352f1。均expected-head合并，完整review分页无未解决意见。
+服务器main无保护/生效rules、无Actions工作流或check contexts，不冒充CI通过；以本地证据交付。
+
+最终13个离线脚本150项通过，新两个模块strict mypy/Ruff/格式/diff-check/secret0通过；
+合并main的完整树与3cff7af相同，未重跑相同源码全套。6条实际CLI回执含既有输入计划、
+缺输入和坏预算；原community状态、输入元数据不变，未执行模型/GPU或创建实验输出目录。
+受测源码de0a587后只有docs变更。最终文档关闭片是
+codex/worldctl-handoff-20261022，实际提交/PR/主线SHA从Git恢复。
+交接/验收清单同时保存在D:/study-agent-validation/CLI_IMPLEMENTATION_PLAN_2026-10-20.md。
+
+下一唯一功能片：有预算的原入口执行器与超时/取消停止；先离线验收执行控制，
+真实GPU实验仍受独立目的/预算、现有清洁门及输入信任边界约束。之后才做同配置比较。
+完整GPU/模型质量/真实呈现资格仍未新增，冻结RC和阈值不变。
+
+## 合并前开发记录
+
 第二片（2026-10-22）：branch `codex/worldctl-catalog-20261022`，worktree
 `/home/zhang/ai/lingbot-worldctl-catalog-20261022`，固定父片
 `fac4d86d177ccaadca83e5f32749ea46b2a669c3`。实现 experiment list/plan，
