@@ -6,7 +6,16 @@
 `/home/zhang/ai/lingbot-worldctl-catalog-20261022`，固定父片
 `fac4d86d177ccaadca83e5f32749ea46b2a669c3`。实现 experiment list/plan，
 只登记下方两个已跟踪历史脚本，不搜索/运行未跟踪实验。基础与新目录自测共21项通过；
-最终现役离线门与最终SHA另由后续交接恢复。新两个模块 strict mypy/Ruff/格式通过。
+现役13个离线脚本共150项检查通过，记录
+`D:/study-agent-validation/worldctl-catalog-offline-20261022/summary.json`。
+新两个模块 strict mypy/Ruff/格式通过，secret scan 0。受测代码de0a587，之后仅docs变更；
+最终SHA由本段提交恢复。当前为本地通过的独立候选，不代表已合main或新GPU资格。
+
+实际CLI业务回执：`D:/study-agent-validation/worldctl-business-e2e-20261022/manifest.json`。
+status、doctor、catalog与使用既有模型/资产/缓存路径的memory计划PASS；
+缺preview输入BLOCKED/3、预算0参数错FAIL/2。全部单JSON/stdout、stderr空，
+没有启动GPU、没有创建实验输出目录；原community状态及TAE/cache文件大小/mtime未变。
+没有读取或反序列化张量正文，不能把计划通过当成实验运行通过。
 
 ## 实验清单与计划
 
