@@ -8,7 +8,10 @@
 没有复制实验源码、模型或私有 examples。此文档维护 CLI 使用与交接，产品权威仍见下方冻结文档。
 
 第一片已实现 status、doctor、help。自身 12 项 stdlib unittest 通过，
-Ruff/格式与新模块 strict mypy 验证；现役离线脚本的最终结果另见后续交接。
+现役 11 个离线脚本的 129 项检查也通过，共 141 项；日志位于
+`D:/study-agent-validation/worldctl-foundation-offline-20261022/summary.json`。
+Ruff/格式与新模块 strict mypy 通过。受测代码提交446c346，之后只改本文档，
+未重跑相同代码树；最终SHA由本文档提交恢复。
 不重新验收模型、GPU、画面质量或真实呈现延迟。
 
 ## 怎么用
