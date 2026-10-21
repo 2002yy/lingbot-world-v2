@@ -54,6 +54,21 @@ def parser_for_cli() -> Parser:
     commands = parser.add_subparsers(dest="command")
     for name in ("status", "doctor", "help"):
         common(commands.add_parser(name, add_help=False))
+    experiment = commands.add_parser("experiment", add_help=False)
+    common(experiment)
+    experiments = experiment.add_subparsers(dest="experiment_command")
+    common(experiments.add_parser("list", add_help=False))
+    plan = experiments.add_parser("plan", add_help=False)
+    common(plan)
+    plan.add_argument("--experiment", default="")
+    plan.add_argument("--timeout", type=int)
+    plan.add_argument("--out-dir", type=Path)
+    plan.add_argument("--tae", type=Path)
+    plan.add_argument("--holdout", action="append", default=[])
+    plan.add_argument("--weights", type=Path)
+    plan.add_argument("--assets", type=Path)
+    plan.add_argument("--base", type=Path)
+    plan.add_argument("--y-cache", type=Path)
     return parser
 
 
@@ -209,7 +224,13 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(options, "help", False) or options.command == "help":
             result["command"] = "help"
             result["data"] = dict(
-                commands=["status", "doctor", "help"],
+                commands=[
+                    "status",
+                    "doctor",
+                    "experiment list",
+                    "experiment plan",
+                    "help",
+                ],
                 side_effects="read-only unless --output is explicit",
             )
         else:
@@ -218,9 +239,27 @@ def main(argv: list[str] | None = None) -> int:
             root, target_head = repository(getattr(options, "repo", ROOT))
             _, result["head_sha"] = repository(ROOT)
             result["command"] = options.command
-            result["data"] = (
-                status(root) if options.command == "status" else doctor(root)
-            )
+            if options.command == "experiment":
+                from worldctl_experiments import catalogue, plan as experiment_plan
+
+                if options.experiment_command not in {"list", "plan"}:
+                    raise CLIError(
+                        2,
+                        "missing_experiment_command",
+                        "Select experiment list or plan.",
+                    )
+                result["command"] = "experiment " + options.experiment_command
+                result["data"] = (
+                    catalogue(root)
+                    if options.experiment_command == "list"
+                    else experiment_plan(root, options)
+                )
+                for key in ("status", "exit_code", "errors"):
+                    result[key] = result["data"][key]
+            else:
+                result["data"] = (
+                    status(root) if options.command == "status" else doctor(root)
+                )
             result["data"].update(
                 requested_repo_head_sha=target_head, inspection_root=str(ROOT)
             )
@@ -270,4 +309,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Direct-script dispatch and imported adapters must share one error class.
+    sys.modules.setdefault("worldctl", sys.modules[__name__])
     raise SystemExit(main())

@@ -2,6 +2,47 @@
 
 ## 当前交接
 
+第二片（2026-10-22）：branch `codex/worldctl-catalog-20261022`，worktree
+`/home/zhang/ai/lingbot-worldctl-catalog-20261022`，固定父片
+`fac4d86d177ccaadca83e5f32749ea46b2a669c3`。实现 experiment list/plan，
+只登记下方两个已跟踪历史脚本，不搜索/运行未跟踪实验。基础与新目录自测共21项通过；
+现役13个离线脚本共150项检查通过，记录
+`D:/study-agent-validation/worldctl-catalog-offline-20261022/summary.json`。
+新两个模块 strict mypy/Ruff/格式通过，secret scan 0。受测代码de0a587，之后仅docs变更；
+最终SHA由本段提交恢复。当前为本地通过的独立候选，不代表已合main或新GPU资格。
+
+实际CLI业务回执：`D:/study-agent-validation/worldctl-business-e2e-20261022/manifest.json`。
+status、doctor、catalog与使用既有模型/资产/缓存路径的memory计划PASS；
+缺preview输入BLOCKED/3、预算0参数错FAIL/2。全部单JSON/stdout、stderr空，
+没有启动GPU、没有创建实验输出目录；原community状态及TAE/cache文件大小/mtime未变。
+没有读取或反序列化张量正文，不能把计划通过当成实验运行通过。
+
+## 实验清单与计划
+
+```bash
+python3 worldctl.py experiment list --json
+python3 worldctl.py experiment plan --experiment preview-handoff --timeout 120 \
+  --tae /path/to/tae.pth --holdout scene=/path/to/trusted-holdout.pt \
+  --out-dir /path/to/new-output --json
+```
+
+| ID | 原入口与参考 | 计划含义 |
+| --- | --- | --- |
+| preview-handoff | preview_2a_handoff.py / docs/PREVIEW_2A_HANDOFF.md | 原三帧切换审计；未来执行会加载可信holdout/TAE、使用CUDA并写preview_2a.json |
+| memory-gate | m0_memgate.py / docs/M0_MEMORY_GATE.md | 原BF16显存实验，原参数512x320、65 chunks、seed42、temporal_stability_8_2；不是当前304x528部署推荐 |
+
+memory-gate计划需显式 `--weights`、`--assets`、`--base` 目录、`--y-cache` 文件和 `--tae` 文件，
+以及 `--timeout`、`--out-dir`。preview计划只接受1～8条唯一tag=path的holdout和TAE。
+原脚本SHA256固定；被改写/缺失、符号链接或文档缺失时不可生成计划，不导入脚本或读取张量内容。
+只检查输入路径存在和输出目录未存在；不证明模型兼容、数据可信或GPU清洁。
+
+计划返回原argv、cwd、原始参数、后续副作用和显式预算。
+`plan_only=true`、`run_available=false`、`execution_authorized=false`，
+`budget_enforced=false`：预算只是未来受控执行器的输入，本命令没有启动任何工作。
+不创建实验输出目录、不反序列化 .pt、不导入torch/wan、不运行nvidia-smi。
+计划PASS仅表示静态计划可生成；原始GPU清洁门、依赖/模型兼容、可信输入和运行授权仍未验收。
+run与compare尚未实现，不能把两份配置不明的历史结果说成公平对照。
+
 2026-10-22：从已合并的 main `335b91b91c0d815d97638e67ee9307ed138fff8b`
 建立独立分支 `codex/worldctl-foundation-20261022`，工作树
 `/home/zhang/ai/lingbot-worldctl-foundation-20261022`。原 community 工作树的未跟踪文件不变，
