@@ -78,6 +78,17 @@ Windows:
 .\run.ps1 play
 ```
 
+### Offline command-line tools
+
+```bash
+python3 worldctl.py doctor --json
+python3 worldctl.py experiment list --json
+```
+
+Inspect local prerequisites and prepare plans without loading the model or starting
+the GPU. See [worldctl usage and limits](docs/WORLDCTL.md). A plan is not an
+executed or qualified experiment.
+
 ### Scope of the latency figures
 
 Two different conditions are measured in this work, and the headline quotes the second.
