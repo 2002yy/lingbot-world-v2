@@ -75,6 +75,12 @@ def parser_for_cli() -> Parser:
     common(inspect)
     inspect.add_argument("--experiment", default="")
     inspect.add_argument("--result", type=Path)
+    associate = experiments.add_parser("associate", add_help=False)
+    common(associate)
+    associate.add_argument("--experiment", default="")
+    associate.add_argument("--result", type=Path)
+    associate.add_argument("--fingerprint", type=Path)
+    associate.add_argument("--purpose", default="")
     compare = experiments.add_parser("compare", add_help=False)
     common(compare)
     compare.add_argument("--left", type=Path)
@@ -268,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
                     "experiment fingerprint",
                     "experiment compare",
                     "experiment inspect",
+                    "experiment associate",
                     "help",
                 ],
                 side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
@@ -302,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                     "fingerprint",
                     "compare",
                     "inspect",
+                    "associate",
                 }:
                     raise CLIError(
                         2,
@@ -309,7 +317,11 @@ def main(argv: list[str] | None = None) -> int:
                         "Select experiment list, plan or preflight.",
                     )
                 result["command"] = "experiment " + options.experiment_command
-                if options.experiment_command == "inspect":
+                if options.experiment_command == "associate":
+                    from worldctl_association import associate
+
+                    result["data"] = associate(root, options)
+                elif options.experiment_command == "inspect":
                     from worldctl_result import inspect_result
 
                     result["data"] = inspect_result(root, options)
