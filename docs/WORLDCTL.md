@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22第二片：codex/worldctl-gpu-check-20261022，以已提交723a4b4为父，
+不读取其他工作树WIP。新增 `python worldctl.py gpu check --timeout 5 --json`。
+只读nvidia-smi两次查询共用1～10秒预算，不导入torch/wan、不启动模型或改GPU状态。
+先核对gpu_cleanliness.py冻结SHA256，再调用其原verdict：不明占用<=700MiB且
+free>=6000MiB。未知进程显存/查询失败/多GPU/归属错配/采样矛盾一律BLOCKED，
+不把未知归属当0；超时退出5，其余无法确认退出3，参数错退出2。
+快照通过仅说明当时干净，不代表未来执行许可或模型兼容/质量。
+dry-run不查GPU；其他--repo不冒充实际CLI的门。查询子环境只传OS路径变量。
+原冻结gate、模型、推理、阈值、部署预设不修改。新增15项模拟遥测检查，
+含固定阈值边界、第二次查询失败、单预算、错误脱敏及CLI单JSON。
+最终完整门/真实业务回执/PR状态见本轮外部清单与Git。
+下一唯一片：登记实验运行配置与输入来源的不可变指纹，为之后同条件比较做准备；
+仍不隐含授权GPU实验。
+
+## 上一片实验静态准备检查
+
 2026-10-22下一轮第一片：codex/worldctl-preflight-20261022，从干净main
 151f00cb9053e4946dac98f0b45198b55b75d2d8独立开发。
 `experiment preflight`沿用plan的输入选项，另要求 `--purpose` 和
