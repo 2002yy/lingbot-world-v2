@@ -85,6 +85,7 @@ def execute(
     before_step: Callable[[list[str]], bool] | None = None,
     record: bool = False,
     record_context: dict[str, str] | None = None,
+    record_root: Path | None = None,
 ) -> dict[str, Any]:
     if (
         not math.isfinite(timeout)
@@ -142,7 +143,18 @@ def execute(
         }
     start = time.monotonic()
     deadline = start + timeout
-    logs = Path(tempfile.mkdtemp(prefix="worldctl-run-"))
+    if record and record_root is not None:
+        record_root = record_root.absolute()
+        if any(path.is_symlink() for path in (record_root, *record_root.parents)):
+            raise ValueError("record root must not traverse symlinks")
+        record_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not record_root.is_dir() or any(
+            path.is_symlink() for path in (record_root, *record_root.parents)
+        ):
+            raise ValueError("record root is unavailable")
+    logs = Path(
+        tempfile.mkdtemp(prefix="worldctl-run-", dir=record_root if record else None)
+    )
     result["log_root"] = str(logs)
     journal = Journal(logs) if record else None
     if journal is not None:

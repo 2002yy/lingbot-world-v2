@@ -24,9 +24,14 @@ Popen失败不再误称已开始。inspect-run只读链/事件/旁边固定名�
 记录只证明保存内容的内部一致性，非签名/来源认证；不授予模型/手工关联/发布资格。
 清理仍限拥有的Linux session，不是沙箱，主动脱离session不在保证内。
 
-主线4b5270b整树与受测7597ed9相同，status/成功记录/超时记录三例符合0/0/5，原1259
-未跟踪文件保留；worldctl-record-main-20261022.json。当前仅文档关闭片
-codex/worldctl-record-handoff-20261022，最终SHA/PR由Git恢复；文档不重复相同源码全套。
+第三片留存修复/交接：codex/worldctl-record-handoff-20261022。主线4b5270b源码与
+受测7597ed9相同，但复验发现原/tmp两份记录已不存在；旧主线复验未通过，不能借旧文件
+作留存证据，具体临时文件清除机制未确认。改offline CLI默认保存到
+~/.local/state/worldctl/runs（不改配置），独立0700运行目录/日志/记录均保留在checkout外。
+内部record_root可选；拒绝symlink路径，dry-run不建目录，测试使用自己的临时fixture根。
+新增3项留存/路径检查，最终25脚本298项门与新持久化CLI回执见外部清单。
+旧临时目录E2E保留为历史样本，不覆盖；新证据另存worldctl-record-persistent-e2e-20261022。
+实际合并/最终主线复验状态由本片最终提交和外部清单恢复；修复是行为变更，重新跑最终门。
 下一唯一功能片：将受控执行记录与产物/配置身份作可追溯关联，先离线fixture，不追认旧运行。
 
 ## 本轮第二片开发记录
@@ -34,7 +39,7 @@ codex/worldctl-record-handoff-20261022，最终SHA/PR由Git恢复；文档不重
 2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
 不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线
 上下文，artifacts保留日志+execution.jsonl；dry-run仍无目录/子进程/完整记录。
-新增 `test inspect-run --record /tmp/worldctl-run-XXX/execution.jsonl --json`，
+新增 `test inspect-run --record /path/to/execution.jsonl --json`，
 只读4MiB/512事件以内常规非symlink记录，不执行其中命令。校验序号/hash链/时间格式/
 事件顺序/实际启动与退出/停止原因/终态，核对旁边固定命名stdout/stderr的大小和SHA。
 缺结束记录/非法类型/越界路径/伪造成功终态拒绝；日志变化FAIL4、缺失BLOCKED3；

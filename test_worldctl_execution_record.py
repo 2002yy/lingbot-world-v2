@@ -188,6 +188,29 @@ class ExecutionRecordTests(unittest.TestCase):
         link.symlink_to(path)
         self.assertEqual(snapshot(link, 100)["status"], "unavailable")
 
+    def test_explicit_record_root_is_retained_after_child_exit(self):
+        store = self.root / "persistent"
+        result = self.run_child("print('retained')", record_root=store)
+        record = Path(result["execution_record"])
+        self.assertTrue(record.is_relative_to(store))
+        self.assertTrue(record.is_file())
+        self.assertEqual(store.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((record.parent / "0.stdout").read_text(), "retained\n")
+
+    def test_record_root_symlink_is_rejected_before_child(self):
+        store = self.root / "store"
+        store.mkdir()
+        link = self.root / "linked-store"
+        link.symlink_to(store, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.run_child("raise Exception('never')", record_root=link)
+        self.assertEqual(list(store.iterdir()), [])
+
+    def test_dry_run_does_not_create_persistent_store(self):
+        store = self.root / "must-not-create"
+        self.run_child("pass", record_root=store, dry_run=True)
+        self.assertFalse(store.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
