@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22本轮第一片：codex/worldctl-fingerprint-20261022，从main
+5a9dd8c8cfa743d67b957d21374a3ae990405f73独立开发。新增
+`experiment fingerprint`：沿用preflight全部参数，再显式提供
+`--max-bytes 67108864 --max-files 1024 --hash-timeout 10`。
+只有静态准备检查通过才读完整输入内容并SHA256；不反序列化、不导入模型、不查GPU。
+max-files计所有入口及目录，最多4096；max-bytes累计最多64GiB；
+hash-timeout最多60秒，在目录遍历和每次分块读取之间检查，不保证打断内核中的慢I/O。
+递归记录目录（含空目录）和文件，拒绝symlink/特殊文件/深度>32，检查读取期间及
+最终stat/checkout稳定；超预算或变化不生成部分指纹。dry-run不读文件内容。
+用CLI --output在checkout外原子保存且不覆盖；不同路径相同内容保持输入身份。
+指纹绑定Git树、登记脚本、配置、依赖版本、计划时限和输入字节，不证明来源真实性，
+不授予未来运行或发布许可。10项新增检查通过；完整门与最终SHA从本轮清单/Git恢复。
+下一片：离线比较两个完整指纹回执，只判断静态条件一致，不冒充真实结果比较。
+
+## 上一轮交付
+
 2026-10-22本轮已交付：PR #8 preflight head723a4b4eb683578516cbe2ec0a8292e1c98dd4ae，
 merge a2b337e2c3176478df223bd183ac50d865d485a7；PR #9 GPU只读快照
 head72bfeca0dc3b5ba2dfcbf3bd23ac5bc09c77c0b0，merge main
