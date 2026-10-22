@@ -2,6 +2,34 @@
 
 ## 当前交接
 
+2026-10-22本轮已交付：PR #14 memory inspect
+headfb46d4659e9182aa12319d1506e58748752b9c30，merge6e859470f78e97461291280781656aae186ffdbb；
+PR #15 preview inspect head2cb7211ee407925beef519b1417a959c8d758477，merge main
+598c2ac05b87e38ad0019651c34bd075b846961f。均expected-head合并，完整review分页
+无线程/无外部审阅结论；repo无Actions工作流、main保护或有效规则，不冒充CI通过。
+
+第一片20脚本229项PASS，第二片21脚本243项PASS；Ruff/格式/三模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-memory-result-offline-20261022/summary.json 与
+worldctl-preview-result-offline-20261022/summary.json。
+10条真实CLI worldctl-result-e2e-20261022/manifest.json：现存m0/preview原始文件检视
+PASS；故意修改的副本能检测汇总矛盾、截断、伪造计数/比值、方向缺失、重复键和参数错；
+dry-run不写报告。两个原始文件SHA/大小/mtime与原community状态不变，无新GPU实验。
+
+找到的真实历史m0有65chunk，余量2724.5625MiB、reserved增长0.3236%；原p50标签
+实际均值1383.066ms，独立中位数1378.649ms。真实preview有3scene/21交接，错误方向0、
+overshoot2、gross0，correction中位0.6131；这些是原记录内一致性，不是新测量。
+M0通过仅历史数值门；preview PASS仅逐项公式/汇总一致，可能仍含负面发现。
+缺失方向不按0错误放行，旧else文案也不代替真实计数；group回退显式披露。
+两个历史文件都缺进程退出、来源/输入/运行身份绑定，不能证明当前部署或发布资格。
+
+主线598c2ac整树与受测2cb7211相同，status/真实M0/真实preview三例通过，原1259
+未跟踪文件保留；worldctl-result-main-20261022.json。当前仅文档关闭片
+codex/worldctl-result-handoff-20261022，最终SHA/PR由Git恢复；不为文档重复相同源码全套。
+下一唯一功能片：提供结果与配置/输入指纹的显式关联；缺执行证据仍标未绑定，不补造来源。
+
+## 本轮第二片开发记录
+
 2026-10-22第二片：codex/worldctl-preview-result-20261022，以已提交fb46d46为父，
 不依赖其他工作树WIP。新增同一inspect入口的 `--experiment preview-handoff`。
 从逐scene/chunk重算距离比值、错误方向/overshoot/gross计数、整体/start/steady中位数。

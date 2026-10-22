@@ -83,13 +83,16 @@ Windows:
 ```bash
 python3 worldctl.py doctor --json
 python3 worldctl.py experiment list --json
+python3 worldctl.py experiment inspect --experiment memory-gate --result /path/m0.json --json
+python3 worldctl.py experiment inspect --experiment preview-handoff --result /path/preview_2a.json --json
 python3 worldctl.py experiment compare --left /path/left.json --right /path/right.json --json
 ```
 
 Inspect local prerequisites and prepare plans without loading the model or starting
 the GPU. See [worldctl usage and limits](docs/WORLDCTL.md). A plan is not an
 executed or qualified experiment. Fingerprints read bounded input bytes; comparisons
-check recorded static conditions, not observed model results.
+check recorded static conditions, not observed model results. Inspection checks historical
+numeric consistency and preserves missing evidence; it does not certify execution or deployment.
 
 ### Scope of the latency figures
 
