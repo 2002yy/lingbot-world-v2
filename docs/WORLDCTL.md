@@ -1,6 +1,58 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接：2026-10-23 审阅修复
+## 当前交接：2026-10-23 身份核对集成候选
+
+PR #22 已以固定 head a86aee6799e6a8e61cfd304721325bc3137c5764 合并，main
+97397d3251ee91a7488424c90de10326d6653435。最终干净候选全量25脚本308项通过；
+三项P2修复和P1接受边界逐条回复并关闭。该审阅是本地当前head检查，未冒充独立GitHub批准；
+仓库 workflows/required rules 均0，不冒充远端CI通过。
+P1仍保留同步fsync无硬超时及SIGKILL不自动清理两项已接受限制。
+
+PR #23 从独立分支同步上述已合并main，仅局部合并交接文档，无源码冲突。
+身份模块/CLI保持原功能，执行器/记录消费端使用已合并的修复。
+组合候选 4836421727ed8b1bdd5bfc6895e17815f53bd798 在干净精确HEAD通过命名影响集80项、
+完整26脚本318项、Ruff/格式及CLI+身份模块strict Linux mypy。
+真实主线/身份交互5例通过：实际offline执行、持久化记录与副本重验、正确旧执行SHA匹配、
+错用检查器新SHA被拒绝。证据 worldctl-record-identity-main-e2e-20261023/manifest.json。
+当前head本地范围审阅无新增问题；独立GitHub审阅/CI不冒充已通过。
+本提交只补交接文字，生产/测试源码摘要保持组合门受测版本；不重复相同源码全量。
+记录 D:/study-agent-validation/worldctl-run-identity-integration-20261023/。
+PR #23 本地验收完成；最终提交/合并状态从本节所属Git提交与GitHub PR恢复。
+推送后只查询当前head的CI/审阅一次；满足当前head门后固定HEAD合并，不等待CI循环。
+下一唯一片：PR #24 绑定已合并main，局部整合CLI注册/交接并跑最终候选门。
+PR #24 已单独修复私有临时路径符号链接问题，72项聚焦通过，仍独立审阅，不混入本候选。
+
+## 身份功能的独立开发记录（历史基线与门）
+
+独立分支 codex/worldctl-run-identity-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-identity-20261023，
+基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
+未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，
+本片不宣称那些问题已在 main 修复。实现完成，命名影响集 67 项 PASS；Ruff/格式与新模块+CLI strict Linux mypy 通过。
+候选已在干净精确 HEAD 跑完一次全量离线门；未声称 CI/审阅/合并通过。验证目录
+D:/study-agent-validation/worldctl-run-identity-verify-20261023/，本节所属提交恢复候选SHA。
+新增 inspect-run 的 --expected-head（完整小写40位SHA）与 --expected-suite。
+核对记录中的 execution_head_sha/suite，缺失 BLOCKED3，不符 FAIL4；匹配仍保留子进程
+失败4/超时5。比较的是记录中的声明，不认证来源或证明模型输入消费；不拿检查器当前
+checkout SHA 冒充受测 SHA。无预期参数时不声称身份匹配。
+例：python worldctl.py test inspect-run --record saved/execution.jsonl --expected-head FULL_SHA --expected-suite offline --json
+
+影响集：新模块测试 + test_worldctl_run_inspect/test_worldctl_execution_record/
+test_worldctl_execution/test_worldctl_test_run/test_worldctl；
+最终候选一次全部离线脚本、Ruff/格式/新模块与CLI strict mypy、diff/范围/无关工作树保护。
+不运行模型/GPU，不追认历史实验来源，不等待其他 CI。
+本地关闭：候选 67e917c3bcbc0932c8ec709b039c5b46235bc6ff，完整 26 脚本 305 项 PASS，
+真实 CLI 6 场景 PASS；Ruff/格式/新模块+CLI strict Linux mypy/diff/密钥扫描0。
+具体见上述目录 candidate.json、focused.json、offline/summary.json、e2e-manifest.json、
+static-*.log、secrets.json。全量仅跑一次，后续本提交只改文档，生产/测试源码字节不变；
+最终 head 由本节所属提交恢复，不把旧 head 的 CI 借给新 head。
+真实 offline 执行本来就把子日志转发 stderr；首次 E2E 错把它当成只读命令要求空 stderr，
+修正验证脚本区分执行/检视后通过，未为验证脚本的错误断言修改业务代码。
+下一唯一片：开本分支独立 PR，记录当前 head 的 CI/审阅一次；不等待其他 PR/CI。
+当前 head 审阅及必要门通过前不合并，仓库 main/PR #22 不因本片本地通过自动改变。
+
+
+
+## 执行记录修复的开发记录（合并前状态）
 
 本轮只收口四条 execution-record 审阅意见，不增加模型/GPU执行能力。
 分支 `codex/worldctl-record-handoff-20261022`，基线/执行前 HEAD
