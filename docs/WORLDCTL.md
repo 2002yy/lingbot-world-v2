@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22本轮第一片：codex/worldctl-association-20261022，从干净main
+361c8964c4d5202f050c4d965d7ef0b476613727独立开发。新增
+`experiment associate --experiment NAME --result raw.json --fingerprint fingerprint.json
+--purpose 'manual historical association' --output new-report.json --json`（命令一行）。
+读取合法完整fingerprint并重新inspect原始结果，核对实验类型、内存已记录配置或preview
+scene标签；把结果字节SHA、配置/输入指纹SHA、登记schema脚本SHA和缺失证据记入手工关联。
+两次读取结果不一致则阻塞。检查失败/指标未知保留原FAIL4/BLOCKED3，不升级为PASS。
+结果缺的seed/geometry/source tree/过程输入hash/process-exit/预算/GPU快照明确未验证。
+association_kind=manual-association、run_binding_verified/provenance_verified/
+results_comparable/execution_authorized/release_qualified始终false；不能追认旧运行。
+dry-run可校验但不生成完整关联记录、不落盘；--output沿用非覆盖原子写入。
+12项新增检查通过；最终完整门/样本/提交见外部清单和Git。
+下一片：重验关联回执与当前提供的两个文件，识别替换/篡改/过期，但不认证执行来源。
+
+## 上一轮交付
+
 2026-10-22本轮已交付：PR #14 memory inspect
 headfb46d4659e9182aa12319d1506e58748752b9c30，merge6e859470f78e97461291280781656aae186ffdbb；
 PR #15 preview inspect head2cb7211ee407925beef519b1417a959c8d758477，merge main
