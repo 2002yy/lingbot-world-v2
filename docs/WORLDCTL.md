@@ -2,6 +2,35 @@
 
 ## 当前交接
 
+2026-10-22本轮已交付：PR #20 execution record
+head32c02f0a94687e328677edc46e962c976f1af21f，merge53f00d20da0e3d9c68e5eb529ed83abf90e87869；
+PR #21 offline接线/inspect-run head7597ed920621953da811762298d4948f76ef3048，merge main
+4b5270bb9837628bbefb6e2e8e054d38a542ce1b。均expected-head合并，完整review分页
+无线程/无外部审阅结论；repo无Actions工作流、main保护或有效规则，不冒充CI通过。
+
+第一片24脚本281项PASS，第二片25脚本295项PASS；Ruff/格式/五模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-execution-record-offline-20261022/summary.json 与
+worldctl-run-inspect-offline-20261022/summary.json。
+11条实际CLI worldctl-record-e2e-20261022/manifest.json：真实11脚本offline成功并记录；
+成功/1秒超时/缺numpy失败的记录重验保留0/5/4；改日志FAIL4；截断/旧hashBLOCKED3；
+dry-run无日志或记录、缺参数FAIL2。记录及日志只在隔离临时目录，原community状态不变。
+缺依赖失败是特意用系统Python的环境负例，不当作实现回归；实际正确环境的offline门通过。
+
+记录覆盖实际PID/session启动、UTC时间、单调耗时、退出码、清理状态和日志大小/SHA；
+逐事件flush/fsync。记录失败不继续启动；终态写失败保留观察到的退出码并阻塞。
+Popen失败不再误称已开始。inspect-run只读链/事件/旁边固定名称日志，不执行所存命令；
+缺结束或成功标题覆盖失败、合并stdout/stderr超预算等都会拒绝。
+记录只证明保存内容的内部一致性，非签名/来源认证；不授予模型/手工关联/发布资格。
+清理仍限拥有的Linux session，不是沙箱，主动脱离session不在保证内。
+
+主线4b5270b整树与受测7597ed9相同，status/成功记录/超时记录三例符合0/0/5，原1259
+未跟踪文件保留；worldctl-record-main-20261022.json。当前仅文档关闭片
+codex/worldctl-record-handoff-20261022，最终SHA/PR由Git恢复；文档不重复相同源码全套。
+下一唯一功能片：将受控执行记录与产物/配置身份作可追溯关联，先离线fixture，不追认旧运行。
+
+## 本轮第二片开发记录
+
 2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
 不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线
 上下文，artifacts保留日志+execution.jsonl；dry-run仍无目录/子进程/完整记录。

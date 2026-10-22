@@ -82,6 +82,8 @@ Windows:
 
 ```bash
 python3 worldctl.py doctor --json
+python3 worldctl.py test run --suite offline --timeout 120 --json
+python3 worldctl.py test inspect-run --record /tmp/worldctl-run-XXX/execution.jsonl --json
 python3 worldctl.py experiment list --json
 python3 worldctl.py experiment associate --experiment preview-handoff --result /path/raw.json --fingerprint /path/fingerprint.json --purpose "manual file association" --output /path/new-association.json --json
 python3 worldctl.py experiment verify-association --association /path/new-association.json --result /path/raw.json --fingerprint /path/fingerprint.json --json
@@ -96,6 +98,8 @@ executed or qualified experiment. Fingerprints read bounded input bytes; compari
 check recorded static conditions, not observed model results. Inspection checks historical
 numeric consistency and preserves missing evidence; it does not certify execution or deployment.
 Manual associations and their verification establish file consistency, not execution provenance.
+Offline runs retain lifecycle records and log hashes. Inspection never replays recorded commands
+and preserves recorded failure or timeout outcomes.
 
 ### Scope of the latency figures
 
