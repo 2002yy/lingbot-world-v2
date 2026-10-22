@@ -54,6 +54,13 @@ def parser_for_cli() -> Parser:
     commands = parser.add_subparsers(dest="command")
     for name in ("status", "doctor", "help"):
         common(commands.add_parser(name, add_help=False))
+    test = commands.add_parser("test", add_help=False)
+    common(test)
+    tests = test.add_subparsers(dest="test_command")
+    run = tests.add_parser("run", add_help=False)
+    common(run)
+    run.add_argument("--suite", default="")
+    run.add_argument("--timeout", type=int)
     experiment = commands.add_parser("experiment", add_help=False)
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
@@ -227,11 +234,12 @@ def main(argv: list[str] | None = None) -> int:
                 commands=[
                     "status",
                     "doctor",
+                    "test run",
                     "experiment list",
                     "experiment plan",
                     "help",
                 ],
-                side_effects="read-only unless --output is explicit",
+                side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
             )
         else:
             if options.command is None:
@@ -239,7 +247,14 @@ def main(argv: list[str] | None = None) -> int:
             root, target_head = repository(getattr(options, "repo", ROOT))
             _, result["head_sha"] = repository(ROOT)
             result["command"] = options.command
-            if options.command == "experiment":
+            if options.command == "test":
+                from worldctl_tests import run as run_tests
+
+                result["command"] = "test " + (options.test_command or "")
+                result["data"] = run_tests(root, options)
+                for key in ("status", "exit_code", "errors", "artifacts"):
+                    result[key] = result["data"][key]
+            elif options.command == "experiment":
                 from worldctl_experiments import catalogue, plan as experiment_plan
 
                 if options.experiment_command not in {"list", "plan"}:
@@ -276,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         result["data"]["dry_run"] = dry_run
         result["duration_ms"] = round((time.monotonic() - started) * 1000)
         if output is not None and not dry_run:
-            result["artifacts"] = [str(output.absolute())]
+            result["artifacts"] = [*result["artifacts"], str(output.absolute())]
             save_new(output, result)
     except CLIError as error:
         result.update(
