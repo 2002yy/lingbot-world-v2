@@ -2,6 +2,21 @@
 
 ## 当前交接
 
+2026-10-22第二片：codex/worldctl-association-verify-20261022，固定已提交571bcae，
+不依赖其他工作树WIP。新增
+`experiment verify-association --association saved.json --result raw.json
+--fingerprint fingerprint.json --json`（命令一行）。
+校验完整手工关联回执的schema/原状态/权限标记/内部hash，再对当前提供的raw和fingerprint
+重新检视并构建同一记录。比较canonical hash，不把3.0和3这种不同类型隐式等同。
+替换/篡改/未知schema/声称有运行权威的回执拒绝；匹配时保留原FAIL4/BLOCKED3，
+不把“文件没变”升级为实验通过。只重验提供的文件，不重新hash模型输入或认证执行来源。
+supplied_files_rechecked=true不等于current_inputs_rechecked/run_binding_verified，
+后两者及results_comparable/发布/执行权威始终false；dry-run不落报告，报告不覆盖。
+新增13项自测和相邻影响集通过；第一片22脚本255项通过，最终门见外部清单。
+下一唯一片：为受控执行器记录开始/结束、退出码和产物信息，先离线验收，不追认旧运行。
+
+## 本轮第一片开发记录
+
 2026-10-22本轮第一片：codex/worldctl-association-20261022，从干净main
 361c8964c4d5202f050c4d965d7ef0b476613727独立开发。新增
 `experiment associate --experiment NAME --result raw.json --fingerprint fingerprint.json
