@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22后续第一片：codex/worldctl-execution-20261022，固定main
+7eff1b3bb5f4c8b3bd498f51e15043e921761d26，独立worktree
+/home/zhang/ai/lingbot-worldctl-execution-20261022。新增内部worldctl_execution.execute：
+Linux/WSL拥有的session、共享时限、原始退出码/日志、超时/取消/日志预算和清理状态。
+不向CLI开放任意命令。自己的会话以外（例如主动setsid脱离的进程）不在清理保证内，
+不是沙箱；其他系统返回BLOCKED。日志检测间隔可短暂超过阈值，清理最多另用约2.5秒。
+子环境只继承OS变量，不继承提供商凭据/测试选项；设置离线与CUDA禁用，隔离HOME。
+正常父进程退出也清理剩余会话成员，确认非zombie进程停止后才cleanup_complete。
+
+9项真实轻量进程测试通过，包含子失败禁止下一步、后代超时停止、父退后清理、
+取消/KeyboardInterrupt、dry-run零目录/零子进程、环境隔离、日志超限。
+Ruff/格式与新模块Linux平台strict mypy通过；不把Windows分析时缺POSIX符号当运行错误。
+本片尚不接GPU/模型实验，不修改模型、阈值或历史脚本。下一片只接既有离线检查白名单。
+
+## 上一轮已合并记录
+
 2026-10-22：两个功能片已合入main：PR #3（status/doctor）head
 fac4d86d177ccaadca83e5f32749ea46b2a669c3，merge7249f4b31070126f681c410d73fc5899fabc3219；
 PR #2（experiment list/plan）head3cff7afcfcc0a6df52416c913727c555ba89e7c8，
