@@ -5,7 +5,11 @@
 2026-10-22：本轮两个独立功能片，执行器 codex/worldctl-execution-20261022
 从 main 7eff1b3bb5f4c8b3bd498f51e15043e921761d26 开始；CLI 接线
 codex/worldctl-test-run-20261022 固定已提交父片 feeae71caba05c0cdbd4203a78c1e7369281a6f2。
-不是依赖其他工作树的未提交内容。最终提交/PR/合并状态以 Git 为准。
+不是依赖其他工作树的未提交内容。两片已合并：PR #5 head feeae71caba05c0cdbd4203a78c1e7369281a6f2，
+merge c5b21fa7c79360d62a83d0f8a9fecae49de535d4；PR #6 head
+b827afa12a3dc2d8adbf01e0cb0e6e665fd3b575，merge main
+6e0dbdd282298e5337b8684bb16d4706a2d96ed3。均expected-head合并，完整审阅线程为空。
+仓库没有Actions工作流、必需check或生效main规则；无CI可等待，不宣称CI成功。
 
 新增 `test run --suite offline --timeout 120`，只运行下面白名单中11个既有CPU检查。
 必须在实际CLI干净checkout运行，祖先 .env 也会阻止执行；每个脚本与固定
@@ -27,8 +31,15 @@ Linux/WSL执行器会在正常父进程退出、超时、取消时清理其拥�
 这不是沙箱。其他平台阻塞；日志检测会短暂超过阈值，清理另需最多约2.5秒。
 子环境只继承OS变量，隔离HOME，禁用CUDA/在线模型下载，不继承提供商凭据。
 
-执行器10项与CLI接线8项新增检查，连同既有CLI共39项；完整离线门结果与
-真实CLI成功/超时/失败回执记录在本轮外部实施清单及验证目录。
+执行器最终14脚本160项通过；接线最终15脚本168项通过（其中CLI共39项）。
+Ruff/格式、Linux strict mypy、diff、secret scan 0通过，两个功能候选干净。
+证据 worldctl-execution-final-20261022/summary.json、
+worldctl-test-run-offline-20261022/summary.json 位于 D:/study-agent-validation。
+六条真实CLI回执 worldctl-test-run-e2e-20261022/manifest.json：11脚本成功、
+dry-run零子进程、1秒预算超时且清理完成、缺numpy真实失败、错误suite/零预算拒绝。
+合并main与最终受测候选整树相同；status/doctor/离线dry-run三条主线检查通过，
+未重复相同源码全套。worldctl-execution-main-20261022.json记录原community的
+1259个未跟踪文件全部保留、无tracked脏改动。当前文档片只补交接，不改变受测行为。
 此轮没有GPU/模型运行，不修改冻结RC、模型、阈值、预设或历史实验脚本。
 下一唯一片：给已登记实验补执行前的预算/输入/环境核验，真实GPU执行仍需明确目的与预算。
 
