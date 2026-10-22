@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22本轮第一片：codex/worldctl-execution-record-20261022，从main
+aa47ead58469f1d62dd6fe7b87c08d84ed6eed5e独立开发。内部execute增加可选record，
+默认不改变现有调用。开启时在隔离日志目录逐步flush/fsync execution.jsonl：
+run_started/step_started/child_started/step_finished/run_finished，包含UTC时间、
+单调时钟耗时、实际PID/session/原始退出码/清理状态和stdout/stderr大小/SHA。
+链式hash只检查内部一致性，不是签名或可信来源；recording_origin_authenticated=false。
+记录失败阻止下一次启动/停止当前进程；缺结束记录不能视为完整；最终写失败保留观察到
+的原退出码并BLOCKED3。log超限只记大小不hash超额内容，仍保留原退出5。
+record模式限制128命令/参数长度/上下文allowlist/1MiB日志预算，避免记录无限增长。
+同时修正启动失败时execution_started误为true：必须实际Popen成功才为true。
+13项新轻量进程测试与原10项通过，含记录故障/超时/取消/零启动/dry-run。
+未接模型/GPU，不改既有会话清理边界（不是沙箱，主动脱离session无保证）。
+下一片：接到offline test run并增加只读inspect-run，核对记录/日志，不授予执行来源权威。
+
+## 上一轮交付
+
 2026-10-22本轮已交付：PR #17 associate
 head571bcaeb44d63ee44940548a8f49f96b83da087f，merge1ef5b983215373af89b4527033443cda92ad909f；
 PR #18 verify-association head85a8f377510cace7536b860a4137c806039654de，merge main

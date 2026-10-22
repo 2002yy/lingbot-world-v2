@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Any
 
+from worldctl_execution_record import Journal, snapshot, utc_now
+
 
 def child_environment(profile: Path, root: Path) -> dict[str, str]:
     allowed = {"PATH", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR", "TMPDIR"}
@@ -81,6 +83,8 @@ def execute(
     log_limit: int = 1_048_576,
     cancel: threading.Event | None = None,
     before_step: Callable[[list[str]], bool] | None = None,
+    record: bool = False,
+    record_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if (
         not math.isfinite(timeout)
@@ -89,6 +93,28 @@ def execute(
         or log_limit <= 0
     ):
         raise ValueError("invalid execution budget or empty command set")
+    if record and (
+        log_limit > 1_048_576
+        or len(commands) > 128
+        or any(
+            not argv
+            or len(argv) > 32
+            or any(not isinstance(arg, str) or len(arg) > 4096 for arg in argv)
+            for argv in commands
+        )
+        or sum(len(arg.encode()) for argv in commands for arg in argv) > 65536
+        or (
+            record_context is not None
+            and (
+                set(record_context) - {"suite", "execution_head_sha", "source_baseline"}
+                or any(
+                    not isinstance(value, str) or len(value) > 256
+                    for value in record_context.values()
+                )
+            )
+        )
+    ):
+        raise ValueError("execution record bounds exceeded")
     result: dict[str, Any] = dict(
         status="PASS",
         exit_code=0,
@@ -118,6 +144,37 @@ def execute(
     deadline = start + timeout
     logs = Path(tempfile.mkdtemp(prefix="worldctl-run-"))
     result["log_root"] = str(logs)
+    journal = Journal(logs) if record else None
+    if journal is not None:
+        result.update(
+            run_id=journal.run_id,
+            execution_record=str(journal.path),
+            execution_record_complete=False,
+            recording_origin_authenticated=False,
+        )
+        if not journal.emit(
+            "run_started",
+            cwd=str(root),
+            commands=commands,
+            budget_seconds=timeout,
+            log_limit=log_limit,
+            context=record_context or {},
+            origin_authenticated=False,
+            release_qualified=False,
+        ):
+            result.update(
+                status="BLOCKED",
+                exit_code=3,
+                execution_started=False,
+                errors=[
+                    dict(
+                        code="execution_record_unavailable",
+                        message="Could not record execution start; no child was launched.",
+                    )
+                ],
+                artifacts=[str(journal.path)],
+            )
+            return result
     profile = logs / "profile"
     profile.mkdir()
     env = child_environment(profile, root)
@@ -144,8 +201,26 @@ def execute(
         reason = ""
         cleanup = True
         process = None
+        step_clock = time.monotonic()
+        started_at = utc_now()
+        if journal is not None and not journal.emit(
+            "step_started", index=index, argv=argv
+        ):
+            result.update(
+                status="BLOCKED",
+                exit_code=3,
+                errors=[
+                    dict(
+                        code="execution_record_unavailable",
+                        message="Could not record the next step; no new child was launched.",
+                    )
+                ],
+            )
+            break
         try:
             with stdout.open("wb") as out, stderr.open("wb") as err:
+                if journal is not None and time.monotonic() >= deadline:
+                    raise TimeoutError
                 process = subprocess.Popen(
                     argv,
                     cwd=root,
@@ -155,6 +230,10 @@ def execute(
                     stderr=err,
                     start_new_session=True,
                 )
+                if journal is not None and not journal.emit(
+                    "child_started", index=index, pid=process.pid, session=process.pid
+                ):
+                    raise OSError("record unavailable")
                 while True:
                     if stdout.stat().st_size + stderr.stat().st_size > log_limit:
                         reason = "log_budget"
@@ -172,8 +251,14 @@ def execute(
                     reason = "timeout"
         except KeyboardInterrupt:
             reason = "cancelled"
+        except TimeoutError:
+            reason = "timeout"
         except OSError:
-            reason = "execution_unavailable"
+            reason = (
+                "execution_record_unavailable"
+                if journal is not None and not journal.healthy
+                else "execution_unavailable"
+            )
         finally:
             if process is not None:
                 cleanup = stop_session(process)
@@ -193,6 +278,28 @@ def execute(
                 cleanup_complete=cleanup,
             )
         )
+        if journal is not None:
+            step = result["steps"][-1]
+            step.update(
+                pid=process.pid if process is not None else None,
+                started_at=started_at,
+                ended_at=utc_now(),
+                duration_seconds=round(time.monotonic() - step_clock, 6),
+            )
+            artifacts = [
+                snapshot(path, log_limit)
+                if cleanup
+                else dict(name=path.name, status="unavailable", bytes=None, sha256=None)
+                for path in (stdout, stderr)
+            ]
+            if not reason and any(item["status"] != "complete" for item in artifacts):
+                reason = "artifact_record_unavailable"
+                step["stop_reason"] = reason
+            if not journal.emit(
+                "step_finished", index=index, record=step, artifacts=artifacts
+            ):
+                reason = "execution_record_unavailable"
+                step["stop_reason"] = reason
         result["artifacts"].extend([str(stdout), str(stderr)])
         remaining = log_limit
         for path in (stdout, stderr):
@@ -217,5 +324,27 @@ def execute(
             ]
             break
     result["duration_seconds"] = round(time.monotonic() - start, 3)
-    result["execution_started"] = bool(result["steps"])
+    result["execution_started"] = any(step["attempted"] for step in result["steps"])
+    if journal is not None:
+        result["artifacts"].append(str(journal.path))
+        result["observed_execution_exit_code"] = result["exit_code"]
+        result["execution_record_complete"] = journal.emit(
+            "run_finished",
+            status=result["status"],
+            exit_code=result["exit_code"],
+            step_count=len(result["steps"]),
+            execution_started=result["execution_started"],
+            stop_code=result["errors"][0]["code"] if result["errors"] else "",
+        )
+        if not result["execution_record_complete"]:
+            result.update(
+                status="BLOCKED",
+                exit_code=3,
+                errors=[
+                    dict(
+                        code="execution_record_unavailable",
+                        message="Execution observations were not fully recorded; inspect retained child exits/logs.",
+                    )
+                ],
+            )
     return result
