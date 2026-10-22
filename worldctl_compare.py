@@ -112,7 +112,7 @@ def validate(payload: Any) -> bool:
             return False
         roles = {"tae", *("holdout:" + tag for tag in tags)}
     else:
-        if configuration != dict(
+        expected_configuration = dict(
             weight="bf16",
             task="i2v-1.3B",
             original_area_argument="512x320",
@@ -120,6 +120,14 @@ def validate(payload: Any) -> bool:
             chunks=65,
             chunk_size=3,
             preset="temporal_stability_8_2",
+        )
+        if (
+            not isinstance(configuration, dict)
+            or configuration != expected_configuration
+            or any(
+                type(configuration[key]) is not type(value)
+                for key, value in expected_configuration.items()
+            )
         ):
             return False
         roles = {"tae", "weights", "assets", "base", "y-cache"}

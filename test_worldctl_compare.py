@@ -133,6 +133,14 @@ class CompareTests(unittest.TestCase):
             self.write(self.right, receipt)
             self.assertEqual(self.call()["exit_code"], 3)
 
+    def test_memory_configuration_rejects_float_as_integer(self):
+        receipt = snapshots.FingerprintTests.memory(self)
+        record = receipt["data"]["fingerprint"]
+        record["payload"]["configuration"]["seed"] = 42.0
+        record["sha256"] = digest(record["payload"])
+        self.write(self.right, receipt)
+        self.assertEqual(self.call()["exit_code"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
