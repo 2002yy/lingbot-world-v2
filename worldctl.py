@@ -81,6 +81,11 @@ def parser_for_cli() -> Parser:
     associate.add_argument("--result", type=Path)
     associate.add_argument("--fingerprint", type=Path)
     associate.add_argument("--purpose", default="")
+    verify_association = experiments.add_parser("verify-association", add_help=False)
+    common(verify_association)
+    verify_association.add_argument("--association", type=Path)
+    verify_association.add_argument("--result", type=Path)
+    verify_association.add_argument("--fingerprint", type=Path)
     compare = experiments.add_parser("compare", add_help=False)
     common(compare)
     compare.add_argument("--left", type=Path)
@@ -275,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                     "experiment compare",
                     "experiment inspect",
                     "experiment associate",
+                    "experiment verify-association",
                     "help",
                 ],
                 side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
@@ -310,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
                     "compare",
                     "inspect",
                     "associate",
+                    "verify-association",
                 }:
                     raise CLIError(
                         2,
@@ -317,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
                         "Select experiment list, plan or preflight.",
                     )
                 result["command"] = "experiment " + options.experiment_command
-                if options.experiment_command == "associate":
+                if options.experiment_command == "verify-association":
+                    from worldctl_association_verify import verify_association
+
+                    result["data"] = verify_association(root, options)
+                elif options.experiment_command == "associate":
                     from worldctl_association import associate
 
                     result["data"] = associate(root, options)
