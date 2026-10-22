@@ -1,6 +1,26 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接
+## 当前交接：2026-10-23 run-identity
+
+独立分支 codex/worldctl-run-identity-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-identity-20261023，
+基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
+未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，
+本片不宣称那些问题已在 main 修复。实现完成，命名影响集 67 项 PASS；Ruff/格式与新模块+CLI strict Linux mypy 通过。
+候选先提交再执行一次全量离线门；尚未声称 full/CI/审阅/合并通过。验证目录
+D:/study-agent-validation/worldctl-run-identity-verify-20261023/，本节所属提交恢复候选SHA。
+新增 inspect-run 的 --expected-head（完整小写40位SHA）与 --expected-suite。
+核对记录中的 execution_head_sha/suite，缺失 BLOCKED3，不符 FAIL4；匹配仍保留子进程
+失败4/超时5。比较的是记录中的声明，不认证来源或证明模型输入消费；不拿检查器当前
+checkout SHA 冒充受测 SHA。无预期参数时不声称身份匹配。
+例：python worldctl.py test inspect-run --record saved/execution.jsonl --expected-head FULL_SHA --expected-suite offline --json
+
+影响集：新模块测试 + test_worldctl_run_inspect/test_worldctl_execution_record/
+test_worldctl_execution/test_worldctl_test_run/test_worldctl；
+最终候选一次全部离线脚本、Ruff/格式/新模块与CLI strict mypy、diff/范围/无关工作树保护。
+不运行模型/GPU，不追认历史实验来源，不等待其他 CI。
+下一唯一片：完成本片本地门并开独立 PR，当前 head 审阅后才考虑合并。
+
+## 上次交接
 
 2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
 不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线
