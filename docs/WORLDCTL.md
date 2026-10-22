@@ -2,6 +2,33 @@
 
 ## 当前交接
 
+2026-10-22本轮已交付：PR #8 preflight head723a4b4eb683578516cbe2ec0a8292e1c98dd4ae，
+merge a2b337e2c3176478df223bd183ac50d865d485a7；PR #9 GPU只读快照
+head72bfeca0dc3b5ba2dfcbf3bd23ac5bc09c77c0b0，merge main
+10fb4d2a9d6469d1c6973964cd633ca8f2bac045。两片均expected-head合并，完整review
+分页无线程/无外部审阅结论；repo没有Actions工作流、main保护或有效规则，不冒充CI通过。
+
+第一片16离线脚本178项PASS，第二片17脚本193项PASS；Ruff/格式/四模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-preflight-offline-20261022/summary.json 和
+worldctl-gpu-check-offline-20261022/summary.json。
+真实六例 worldctl-preflight-gpu-e2e-20261022/manifest.json：既有memory输入静态
+PASS；未确认信任BLOCKED/3；缺目的FAIL/2；GPU dry-run无设备调用；缺预算FAIL/2；
+一次真实GPU快照PASS（72MiB不明占用、7828MiB free），只代表当时采样。
+原输入stat和community状态不变，没有模型/GPU计算，没有创建实验输出目录。
+main整树与受测72bfeca相同，status/list/GPU dry-run三条通过，原1259个未跟踪
+文件保留，证据worldctl-preflight-gpu-main-20261022.json；不重复相同源码全套。
+当前只读文档关闭片codex/worldctl-preflight-handoff-20261022，最终SHA/PR从Git恢复。
+
+使用 `experiment preflight` 时沿用下文plan参数，另加
+`--purpose 'check preview handoff' --trusted-inputs`；信任确认并非来源证明。
+GPU快照单独用 `python worldctl.py gpu check --timeout 5 --json`；
+它没有未来运行许可，也不能代替运行前即时重验。静态检查和快照均未验证模型兼容性。
+下一唯一功能片：登记实验配置与输入来源的不可变指纹，之后才同条件比较；
+实际GPU执行仍受明确目的/预算、输入来源、原清洁门和执行器接线约束。
+
+## 本轮第二片开发记录
+
 2026-10-22第二片：codex/worldctl-gpu-check-20261022，以已提交723a4b4为父，
 不读取其他工作树WIP。新增 `python worldctl.py gpu check --timeout 5 --json`。
 只读nvidia-smi两次查询共用1～10秒预算，不导入torch/wan、不启动模型或改GPU状态。
