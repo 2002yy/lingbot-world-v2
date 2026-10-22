@@ -103,7 +103,7 @@ def inspect_payload(archive: Any) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(
             prefix="worldctl-archive-inspect-"
         ) as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for name, raw in decoded.items():
                 (root / name).write_bytes(raw)
             inspection = inspect_run(root / "execution.jsonl")

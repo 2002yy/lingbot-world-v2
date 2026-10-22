@@ -2,6 +2,15 @@
 
 ## 当前交接：2026-10-23 run-archive
 
+本次后续：PR #24 的 P2 discussion_r4351731025 已复现并修复。
+私有解包目录先 resolve 再交给现有只读 reader；外部输入的 symlink 拒绝规则保持不变。
+用符号链接临时父目录的新回归，在旧代码上稳定 execution_record_incomplete；修复后
+命名影响集72项 PASS，Ruff/格式/新模块 strict Linux mypy通过。
+证据 D:/study-agent-validation/worldctl-archive-temp-review-20261023/。
+这是有界审阅修复，未重复全量；下面309项全量只属于旧代码候选。
+修复提交推送后等待当前head审阅；进入最终合并候选时再跑一次完整离线门。
+当前 PR #24 OPEN；#22/#23 另按各自候选收口，不依赖其未提交改动。
+
 独立分支 codex/worldctl-run-archive-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-archive-20261023，
 基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
 未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import worldctl
 from worldctl_execution import execute
@@ -67,6 +68,25 @@ class RunArchiveTests(unittest.TestCase):
         with self.assertRaises(worldctl.CLIError) as error:
             operation()
         self.assertEqual(error.exception.code, code)
+
+    def test_private_extraction_resolves_symlinked_temp_ancestor(self):
+        archive = self.build(self.create())["archive"]
+        real_directory = self.root / "real-temp"
+        real_directory.mkdir()
+        alias = self.root / "temp-alias"
+        alias.symlink_to(real_directory, target_is_directory=True)
+        original = tempfile.TemporaryDirectory
+
+        def private_directory(*args, **kwargs):
+            return original(*args, dir=alias, **kwargs)
+
+        with patch(
+            "worldctl_run_archive.tempfile.TemporaryDirectory", private_directory
+        ):
+            result = inspect_payload(archive)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertTrue(result["archive_verified"])
+        self.assertEqual(list(real_directory.iterdir()), [])
 
     def test_roundtrip_survives_source_removal_without_runtime_authority(self):
         record = self.create()
