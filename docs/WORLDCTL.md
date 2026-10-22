@@ -1,6 +1,30 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接
+## 当前交接：2026-10-23 run-archive
+
+独立分支 codex/worldctl-run-archive-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-archive-20261023，
+基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
+未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，
+本片不宣称那些问题已在 main 修复。实现完成，命名影响集 71 项 PASS；Ruff/格式与新模块+CLI strict Linux mypy 通过。
+候选先提交再执行一次全量离线门；尚未声称 full/CI/审阅/合并通过。验证目录
+D:/study-agent-validation/worldctl-run-archive-verify-20261023/，本节所属提交恢复候选SHA。
+新增 test archive-run --record execution.jsonl --output new-archive.json --json；
+将完整记录与限额内所有 stdout/stderr 字节打包为自包含JSON回执，逐文件SHA和总摘要。
+新增 test inspect-archive --archive new-archive.json --json，不依赖原目录重新检视副本，
+不重放命令。保留子进程 FAIL4/超时5，不因归档成功升级实验结果。
+最多257文件/合计5MiB，读取回执上限8MiB；拒绝缺失/篡改/超限/路径越界/重复条目/
+symlink，不覆盖已存在 output。仅接受日志hash完整的记录，不截断后冒充完整归档。
+dry-run 不生成完整归档或输出回执；会用自动清除的私有临时目录核对副本。
+归档含所选日志原文（base64），是调用方明确选择导出的数据；不是脱敏报告。
+这是文件/日志一致性，不是来源签名、断电持久性、模型输入消费或发布资格证明。
+
+影响集：新模块测试 + test_worldctl_run_inspect/test_worldctl_execution_record/
+test_worldctl_execution/test_worldctl_test_run/test_worldctl；
+最终候选一次全部离线脚本、Ruff/格式/新模块与CLI strict mypy、diff/范围/无关工作树保护。
+不运行模型/GPU，不追认历史实验来源，不等待其他 CI。
+下一唯一片：完成本片本地门并开独立 PR，当前 head 审阅后才考虑合并。
+
+## 上次交接
 
 2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
 不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线

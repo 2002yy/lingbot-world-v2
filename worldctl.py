@@ -70,6 +70,12 @@ def parser_for_cli() -> Parser:
     inspect_run = tests.add_parser("inspect-run", add_help=False)
     common(inspect_run)
     inspect_run.add_argument("--record", type=Path)
+    archive_run = tests.add_parser("archive-run", add_help=False)
+    common(archive_run)
+    archive_run.add_argument("--record", type=Path)
+    inspect_archive = tests.add_parser("inspect-archive", add_help=False)
+    common(inspect_archive)
+    inspect_archive.add_argument("--archive", type=Path)
     experiment = commands.add_parser("experiment", add_help=False)
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
@@ -277,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
                     "gpu check",
                     "test run",
                     "test inspect-run",
+                    "test archive-run",
+                    "test inspect-archive",
                     "experiment list",
                     "experiment plan",
                     "experiment preflight",
@@ -287,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                     "experiment verify-association",
                     "help",
                 ],
-                side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
+                side_effects="test run executes offline checks; archive-run packages selected journal/log bytes; --output writes a new report",
             )
         else:
             if options.command is None:
@@ -304,7 +312,15 @@ def main(argv: list[str] | None = None) -> int:
                     result[key] = result["data"][key]
             elif options.command == "test":
                 result["command"] = "test " + (options.test_command or "")
-                if options.test_command == "inspect-run":
+                if options.test_command == "archive-run":
+                    from worldctl_run_archive import archive_run
+
+                    result["data"] = archive_run(options)
+                elif options.test_command == "inspect-archive":
+                    from worldctl_run_archive import inspect_archive
+
+                    result["data"] = inspect_archive(options.archive)
+                elif options.test_command == "inspect-run":
                     from worldctl_run_inspect import inspect_run
 
                     result["data"] = inspect_run(options.record)
