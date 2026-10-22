@@ -2,6 +2,35 @@
 
 ## 当前交接
 
+2026-10-22本轮已交付：PR #17 associate
+head571bcaeb44d63ee44940548a8f49f96b83da087f，merge1ef5b983215373af89b4527033443cda92ad909f；
+PR #18 verify-association head85a8f377510cace7536b860a4137c806039654de，merge main
+54b238f61c513f00f5219b1e305757318b8c64c3。均expected-head合并，完整review分页
+无线程/无外部审阅结论；repo无Actions工作流、main保护或有效规则，不冒充CI通过。
+
+第一片22脚本255项PASS，第二片23脚本268项PASS；Ruff/格式/三模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-association-offline-20261022/summary.json 与
+worldctl-association-verify-offline-20261022/summary.json。
+13条真实CLI worldctl-association-e2e-20261022/manifest.json：成功使用明确合成输入，
+创建与重验手工关联；改raw字节/换合法fingerprint均FAIL4；篡改hash/权限声明BLOCKED3；
+dry-run不生成完整记录且拒绝重验；真实历史preview与合成scene标签不符FAIL4；
+合成memory原本失败时，即使关联文件重验匹配仍FAIL4。历史raw hash/mtime及原community
+状态不变，无新模型/GPU实验，无真实模型输入hash或来源验收。
+
+关联核对的是文件和已记录字段：preview场景、memory的weight/preset/chunks/chunk_size；
+旧结果缺seed/geometry/source-tree/真实消耗输入hash/process-exit/预算/GPU快照时仍未绑定。
+手工关联可存失败/未知结果，必须保留原FAIL/BLOCKED；不能把文件一致变成实验通过。
+supplied_files_rechecked是当前提供文件校验，不是模型输入/运行来源证明；
+run_binding_verified、provenance_verified、results_comparable和执行/发布许可始终false。
+
+主线54b238f整树与受测85a8f37相同，status/合成associate/verify三例通过，原1259
+未跟踪文件保留；worldctl-association-main-20261022.json。当前仅文档关闭片
+codex/worldctl-association-handoff-20261022，最终SHA/PR由Git恢复；文档不重复相同源码全套。
+下一唯一功能片：为受控执行器记录开始/结束、退出码和产物信息，先离线验收，不追认旧运行。
+
+## 本轮第二片开发记录
+
 2026-10-22第二片：codex/worldctl-association-verify-20261022，固定已提交571bcae，
 不依赖其他工作树WIP。新增
 `experiment verify-association --association saved.json --result raw.json
