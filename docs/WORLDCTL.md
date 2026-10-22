@@ -6,7 +6,7 @@
 基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
 未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，
 本片不宣称那些问题已在 main 修复。实现完成，命名影响集 67 项 PASS；Ruff/格式与新模块+CLI strict Linux mypy 通过。
-候选先提交再执行一次全量离线门；尚未声称 full/CI/审阅/合并通过。验证目录
+候选已在干净精确 HEAD 跑完一次全量离线门；未声称 CI/审阅/合并通过。验证目录
 D:/study-agent-validation/worldctl-run-identity-verify-20261023/，本节所属提交恢复候选SHA。
 新增 inspect-run 的 --expected-head（完整小写40位SHA）与 --expected-suite。
 核对记录中的 execution_head_sha/suite，缺失 BLOCKED3，不符 FAIL4；匹配仍保留子进程
@@ -18,7 +18,15 @@ checkout SHA 冒充受测 SHA。无预期参数时不声称身份匹配。
 test_worldctl_execution/test_worldctl_test_run/test_worldctl；
 最终候选一次全部离线脚本、Ruff/格式/新模块与CLI strict mypy、diff/范围/无关工作树保护。
 不运行模型/GPU，不追认历史实验来源，不等待其他 CI。
-下一唯一片：完成本片本地门并开独立 PR，当前 head 审阅后才考虑合并。
+本地关闭：候选 67e917c3bcbc0932c8ec709b039c5b46235bc6ff，完整 26 脚本 305 项 PASS，
+真实 CLI 6 场景 PASS；Ruff/格式/新模块+CLI strict Linux mypy/diff/密钥扫描0。
+具体见上述目录 candidate.json、focused.json、offline/summary.json、e2e-manifest.json、
+static-*.log、secrets.json。全量仅跑一次，后续本提交只改文档，生产/测试源码字节不变；
+最终 head 由本节所属提交恢复，不把旧 head 的 CI 借给新 head。
+真实 offline 执行本来就把子日志转发 stderr；首次 E2E 错把它当成只读命令要求空 stderr，
+修正验证脚本区分执行/检视后通过，未为验证脚本的错误断言修改业务代码。
+下一唯一片：开本分支独立 PR，记录当前 head 的 CI/审阅一次；不等待其他 PR/CI。
+当前 head 审阅及必要门通过前不合并，仓库 main/PR #22 不因本片本地通过自动改变。
 
 ## 上次交接
 
