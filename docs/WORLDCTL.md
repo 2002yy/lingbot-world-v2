@@ -2,19 +2,35 @@
 
 ## 当前交接
 
-2026-10-22后续第一片：codex/worldctl-execution-20261022，固定main
-7eff1b3bb5f4c8b3bd498f51e15043e921761d26，独立worktree
-/home/zhang/ai/lingbot-worldctl-execution-20261022。新增内部worldctl_execution.execute：
-Linux/WSL拥有的session、共享时限、原始退出码/日志、超时/取消/日志预算和清理状态。
-不向CLI开放任意命令。自己的会话以外（例如主动setsid脱离的进程）不在清理保证内，
-不是沙箱；其他系统返回BLOCKED。日志检测间隔可短暂超过阈值，清理最多另用约2.5秒。
-子环境只继承OS变量，不继承提供商凭据/测试选项；设置离线与CUDA禁用，隔离HOME。
-正常父进程退出也清理剩余会话成员，确认非zombie进程停止后才cleanup_complete。
+2026-10-22：本轮两个独立功能片，执行器 codex/worldctl-execution-20261022
+从 main 7eff1b3bb5f4c8b3bd498f51e15043e921761d26 开始；CLI 接线
+codex/worldctl-test-run-20261022 固定已提交父片 feeae71caba05c0cdbd4203a78c1e7369281a6f2。
+不是依赖其他工作树的未提交内容。最终提交/PR/合并状态以 Git 为准。
 
-9项真实轻量进程测试通过，包含子失败禁止下一步、后代超时停止、父退后清理、
-取消/KeyboardInterrupt、dry-run零目录/零子进程、环境隔离、日志超限。
-Ruff/格式与新模块Linux平台strict mypy通过；不把Windows分析时缺POSIX符号当运行错误。
-本片尚不接GPU/模型实验，不修改模型、阈值或历史脚本。下一片只接既有离线检查白名单。
+新增 `test run --suite offline --timeout 120`，只运行下面白名单中11个既有CPU检查。
+必须在实际CLI干净checkout运行，祖先 .env 也会阻止执行；每个脚本与固定
+7eff1b3 基线blob核对，每一步重查HEAD/干净状态/来源。不会执行未跟踪实验。
+使用含numpy的现有Python环境；缺依赖会按真实子进程失败返回，不伪装成通过。
+
+```bash
+/home/zhang/ai/lingbot-env/bin/python worldctl.py test run --suite offline --timeout 120 --json
+/home/zhang/ai/lingbot-env/bin/python worldctl.py test run --suite offline --timeout 120 --dry-run --json
+```
+
+stdout是单个JSON，子进程输出转到stderr并保存在隔离的 `/tmp/worldctl-run-*`。
+`--output` 报告应写在checkout外，禁止覆盖，保留各子日志链接。
+失败立即停止后续检查；子失败退出4，超时/取消/日志超限退出5，前置条件阻塞退出3。
+整组共用一个预算，不是每个脚本重置预算。dry-run不创建日志或子进程。
+
+Linux/WSL执行器会在正常父进程退出、超时、取消时清理其拥有的session，
+回传原始退出码与cleanup_complete；主动setsid脱离的进程不在清理保证内，
+这不是沙箱。其他平台阻塞；日志检测会短暂超过阈值，清理另需最多约2.5秒。
+子环境只继承OS变量，隔离HOME，禁用CUDA/在线模型下载，不继承提供商凭据。
+
+执行器10项与CLI接线8项新增检查，连同既有CLI共39项；完整离线门结果与
+真实CLI成功/超时/失败回执记录在本轮外部实施清单及验证目录。
+此轮没有GPU/模型运行，不修改冻结RC、模型、阈值、预设或历史实验脚本。
+下一唯一片：给已登记实验补执行前的预算/输入/环境核验，真实GPU执行仍需明确目的与预算。
 
 ## 上一轮已合并记录
 
