@@ -2,6 +2,22 @@
 
 ## 当前交接
 
+2026-10-22第二片：codex/worldctl-compare-20261022，以已提交40d3eeb为父，
+不依赖其他工作树WIP。新增
+`experiment compare --left /path/left.json --right /path/right.json --json`。
+只读两个experiment fingerprint的完整成功CLI回执，限常规非symlink文件，
+每个最多64MiB；拒绝重复JSON键、未知schema、缺字段/类型错/重复角色、路径穿越、
+非完整或声称执行/来源权威的回执，重算payload SHA256后才比较。
+相同返回PASS/0，不同返回FAIL/4并列出字段；无效输入BLOCKED/3，缺参数FAIL/2。
+校验的是回执内部一致性，不认证回执作者，不重查当前模型输入，也不比较实际实验结果。
+source_tree绑定整Git树（包括文档），差异会保守标为不同，不默默忽略。
+--output沿用非覆盖原子报告，dry-run不落盘；没有模型/GPU/网络操作。
+第一片18脚本203项通过，第二片11项新检查及直接影响集通过；最终完整门与
+真实CLI样本/合并状态记录在本轮外部清单和Git。
+下一唯一片：检查已登记历史实验的原始结果文件并明确其证据范围，不执行新GPU实验。
+
+## 本轮第一片开发记录
+
 2026-10-22本轮第一片：codex/worldctl-fingerprint-20261022，从main
 5a9dd8c8cfa743d67b957d21374a3ae990405f73独立开发。新增
 `experiment fingerprint`：沿用preflight全部参数，再显式提供
