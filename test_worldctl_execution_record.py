@@ -4,14 +4,17 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 import worldctl_execution as execution
+import worldctl_execution_record as record
 from worldctl_execution_record import Journal, snapshot
 from worldctl_fingerprint import digest
 
@@ -210,6 +213,110 @@ class ExecutionRecordTests(unittest.TestCase):
         store = self.root / "must-not-create"
         self.run_child("pass", record_root=store, dry_run=True)
         self.assertFalse(store.exists())
+
+    def test_record_root_that_is_a_file_blocks_before_launch(self):
+        occupied = self.root / "not-a-directory"
+        occupied.write_text("occupied")
+        result = self.run_child(
+            "open('must-not-exist','w').write('x')", record_root=occupied
+        )
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["errors"][0]["code"], "execution_record_unavailable")
+        self.assertFalse(result["execution_started"])
+        self.assertFalse(result["execution_record_complete"])
+        self.assertFalse((self.root / "must-not-exist").exists())
+
+    def test_run_directory_failure_returns_blocked_record_state(self):
+        store = self.root / "store"
+        with patch.object(execution.tempfile, "mkdtemp", side_effect=OSError("full")):
+            result = self.run_child("raise Exception('never')", record_root=store)
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["errors"][0]["code"], "execution_record_unavailable")
+        self.assertFalse(result["execution_started"])
+        self.assertFalse(result["execution_record_complete"])
+
+    def test_journal_open_failure_returns_blocked_record_state(self):
+        with patch.object(execution, "Journal", side_effect=OSError("no space")):
+            result = self.run_child("raise Exception('never')")
+        self.assertEqual(result["exit_code"], 3)
+        self.assertEqual(result["errors"][0]["code"], "execution_record_unavailable")
+        self.assertFalse(result["execution_started"])
+        self.assertFalse(result["execution_record_complete"])
+
+    @unittest.skipUnless(os.name == "posix", "directory fsync is POSIX-only")
+    def test_journal_persists_its_directory_entry(self):
+        calls = []
+        real = os.fsync
+
+        def counting(fd):
+            calls.append(fd)
+            real(fd)
+
+        with patch("worldctl_execution_record.os.fsync", counting):
+            Journal(self.root)
+        self.assertEqual(len(calls), 1)
+
+    def test_start_confirmation_window_is_observed(self):
+        original = Journal.emit
+
+        def slow_emit(journal, event, **data):
+            if event == "child_started":
+                time.sleep(0.3)
+            return original(journal, event, **data)
+
+        with patch.object(Journal, "emit", slow_emit):
+            result = self.run_child("pass", timeout=5)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertGreaterEqual(result["steps"][0]["start_confirm_seconds"], 0.3)
+
+    def test_start_confirmation_window_is_charged_to_the_budget(self):
+        original = Journal.emit
+
+        def slow_emit(journal, event, **data):
+            if event == "child_started":
+                time.sleep(0.6)
+            return original(journal, event, **data)
+
+        with patch.object(Journal, "emit", slow_emit):
+            result = self.run_child("import time; time.sleep(10)", timeout=0.4)
+        self.assertEqual(result["exit_code"], 5)
+        self.assertEqual(result["steps"][0]["stop_reason"], "timeout")
+        self.assertTrue(result["steps"][0]["cleanup_complete"])
+
+    def test_child_exiting_during_confirmation_is_still_reaped(self):
+        original = Journal.emit
+
+        def slow_emit(journal, event, **data):
+            if event == "child_started":
+                time.sleep(0.5)
+            return original(journal, event, **data)
+
+        with patch.object(Journal, "emit", slow_emit):
+            result = self.run_child("raise SystemExit(9)", timeout=5)
+        self.assertEqual(result["steps"][0]["child_exit_code"], 9)
+        self.assertEqual(result["exit_code"], 4)
+        self.assertTrue(result["steps"][0]["cleanup_complete"])
+
+    def test_recorded_stop_reason_uses_the_shared_outcome_mapping(self):
+        for step, expected in [
+            (
+                dict(stop_reason="", cleanup_complete=True, child_exit_code=0),
+                ("PASS", 0, ""),
+            ),
+            (
+                dict(stop_reason="", cleanup_complete=True, child_exit_code=7),
+                ("FAIL", 4, "child_failed"),
+            ),
+            (
+                dict(stop_reason="timeout", cleanup_complete=True, child_exit_code=-15),
+                ("BLOCKED", 5, "timeout"),
+            ),
+            (
+                dict(stop_reason="", cleanup_complete=False, child_exit_code=None),
+                ("BLOCKED", 3, "cleanup_incomplete"),
+            ),
+        ]:
+            self.assertEqual(record.step_outcome(step), expected)
 
 
 if __name__ == "__main__":

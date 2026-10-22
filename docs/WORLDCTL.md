@@ -1,6 +1,58 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接
+## 当前交接：2026-10-23 审阅修复
+
+本轮只收口四条 execution-record 审阅意见，不增加模型/GPU执行能力。
+分支 `codex/worldctl-record-handoff-20261022`，基线/执行前 HEAD
+`1a9f95928763cc3487644991c50f6f851d94290b`，PR #22 尚未合并。
+阶段 A 已准备五个 Python 文件；本条记录补入第六个文件 `docs/WORLDCTL.md`。
+阶段 B/C 已在 WSL/Linux 真实执行通过；代码与本文档已应用到目标工作树。
+本次直接从 WSL 读取目标：HEAD/13205 字节原版吻合，但工作树当前干净；
+交接提到的四项无关修改已不在当前 diff。仍保存并比较
+eval_two_layer.py、lingbot_fp8.py、run.sh、setup.sh 的字节摘要，不修改或暂存它们。
+
+冻结裁定：Popen → 同步 child_started 写入/flush/fsync → 立即检查截止时间/取消 →
+监督循环。启动确认时间计入同一预算，暴露 `start_confirm_seconds`。
+除 Linux 实测证明真实缺陷，不改成异步模型；四条意见在验收后用一个提交收口，
+不拆散生产端/消费端共享的 `TERMINAL_STOP_CODES` 与 `step_outcome`。
+记录目录/文件创建失败应结构化 BLOCKED3 且不启动子进程；新目录项同步；
+inspect-run 必须严格配对停止原因和退出码，不能用独立允许集合冒充一致性。
+
+两条接受的限制：
+- fsync 没有硬超时。确认窗口计入总预算，只能在调用返回后立即检查和清理；
+  fsync 卡住期间不保证到点终止。同步一次调用不等于有界时间。
+- SIGKILL 不执行 finally；start_new_session 不会在父进程死亡时自动清理孤儿。
+  崩溃探针自己的清理标注 `cleanup_by: probe`，不能算 worldctl 清理保证。
+
+两窗口验收：确认 fsync 后杀父进程，必须保留 child_started、没有终态、inspect 拒绝3；
+写确认前杀父进程，必须标为 uncertain-record-missing，绝不推断未启动。
+两窗口均需证明真实 SIGKILL/PID，探针清理完自身子进程，不能把未触发窗口当 PASS。
+该探针验证进程崩溃可观察性，不模拟断电，不证明磁盘/文件系统跨掉电持久性。
+
+产物集中在 `D:/study-agent-validation/`：源码 worldctl-src/；补丁
+worldctl-review-fix-20261023.patch；原五文件备份 worldctl-review-fix-backup-20261023/；
+崩溃探针 worldctl-crash-probe-20261023.py；执行脚本 worldctl-review-fix-20261023.sh。
+Linux 入口：`bash /mnt/d/study-agent-validation/worldctl-review-fix-20261023.sh`。
+门顺序：精确分支/HEAD/范围断言 → 备份六文件 → 应用六文件 → 比较无关文件摘要 →
+三组 unittest → 两窗口崩溃探针 → 全量 CPU/offline 脚本门。
+输出 worldctl-review-fix-verify-20261023/，已存在时停止而不覆盖。
+脚本不提交；任一失败即停，未通过 Linux 门前不提交或合并。
+之后检查 Ruff/格式/Linux strict mypy、diff 范围，再单提交；PR 当前 head 审阅/必要门
+确认后才能合并，不借旧 head 的检查，不声称 CI 或 GPU/发布验收通过。
+本轮实测：三组 unittest 50 项 PASS；全量 25 脚本 308 项 PASS；
+两窗口均 CLI -9、inspect3、无终态、探针清理成功，分别为 durable 与
+uncertain-record-missing。四个无关文件 SHA256 前后相同。
+Ruff/格式与三生产模块 strict mypy（Linux target）通过；两文件仅格式调整经 AST
+一致性检查，不重复全量门；最终再跑三组 focused 门并保存精确文件摘要。
+全量 summary 的 head 是测试时基线 HEAD，必须结合 validated-source.sha256/applied.patch
+识别当时未提交的受测代码；不能把该 head 当作修复已提交的证据。
+补丁、备份和探针为离线验收附件，Linux 日志在上述 verify 目录；崩溃样本另归档到其
+crash-records/，不依赖 /tmp 留存。单提交/推送后的精确 SHA 从本节所属提交及 PR #22
+恢复；本地验收通过不等于远端审阅通过。未自动合并 main。
+启动确认窗口保留原 P1 讨论指出的同步 fsync 限制，作为接受的边界而非硬超时修复。
+下一唯一执行片：审阅 PR #22 当前修复提交，确认这项接受的边界及其余三条修复后收口。
+
+## 上次交接（2026-10-22）
 
 2026-10-22本轮已交付：PR #20 execution record
 head32c02f0a94687e328677edc46e962c976f1af21f，merge53f00d20da0e3d9c68e5eb529ed83abf90e87869；
