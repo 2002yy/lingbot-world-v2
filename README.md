@@ -98,8 +98,9 @@ executed or qualified experiment. Fingerprints read bounded input bytes; compari
 check recorded static conditions, not observed model results. Inspection checks historical
 numeric consistency and preserves missing evidence; it does not certify execution or deployment.
 Manual associations and their verification establish file consistency, not execution provenance.
-Offline runs retain lifecycle records and log hashes under ~/.local/state/worldctl/runs
-(outside the checkout), rather than temporary storage. Inspection never replays recorded commands
+Offline runs retain lifecycle records and hashes for logs within the configured limit
+under ~/.local/state/worldctl/runs (outside the checkout), rather than temporary storage.
+Oversized logs retain size information without a hash and are not reported as hash-verified. Inspection never replays recorded commands
 and preserves recorded failure or timeout outcomes.
 
 ### Scope of the latency figures

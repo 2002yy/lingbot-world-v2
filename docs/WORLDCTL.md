@@ -17,7 +17,7 @@ worldctl-run-inspect-offline-20261022/summary.json。
 dry-run无日志或记录、缺参数FAIL2。记录及日志只在隔离临时目录，原community状态不变。
 缺依赖失败是特意用系统Python的环境负例，不当作实现回归；实际正确环境的offline门通过。
 
-记录覆盖实际PID/session启动、UTC时间、单调耗时、退出码、清理状态和日志大小/SHA；
+记录覆盖实际PID/session启动、UTC时间、单调耗时、退出码、清理状态和日志大小/限额内的SHA（超限仅记大小）；
 逐事件flush/fsync。记录失败不继续启动；终态写失败保留观察到的退出码并阻塞。
 Popen失败不再误称已开始。inspect-run只读链/事件/旁边固定名称日志，不执行所存命令；
 缺结束或成功标题覆盖失败、合并stdout/stderr超预算等都会拒绝。
@@ -34,7 +34,8 @@ Ruff/格式/五模块Linux strict mypy/diff/secret0通过，随后仅文档变�
 worldctl-record-retention-offline-20261022/summary.json与
 worldctl-record-persistent-e2e-20261022/manifest.json记录11条新实际CLI、
 跨进程留存复验及3份记录/相邻日志的D盘归档副本，源与副本保留0/5/4结果。
-第三片PR #22已从文档改为留存修复+交接，最终HEAD/合并状态从Git/PR恢复。
+第三片PR #22已从文档改为留存修复+交接；旧head的README P2意见要求限定哈希声明，
+现已明确仅限预算内日志，超限无hash且不称已验证。最终HEAD/合并状态从Git/PR恢复。
 主线最终复验见worldctl-record-main-20261022.json（修复前曾失败，不借旧结果）。
 旧临时目录E2E保留为历史样本，不覆盖；新证据另存worldctl-record-persistent-e2e-20261022。
 实际合并/最终主线复验状态由本片最终提交和外部清单恢复；修复是行为变更，重新跑最终门。
