@@ -11,7 +11,12 @@ from typing import Any, NoReturn
 
 from worldctl import CLIError
 from worldctl_compare import hex_string, pairs
-from worldctl_execution_record import snapshot
+from worldctl_execution_record import (
+    STOP_REASONS,
+    TERMINAL_STOP_CODES,
+    snapshot,
+    step_outcome,
+)
 from worldctl_fingerprint import digest, identity
 from worldctl_result import number
 
@@ -140,6 +145,7 @@ def inspect_run(path: Path | None) -> dict[str, Any]:
     index = 1
     steps: list[dict[str, Any]] = []
     outcome = 0
+    derived_status, derived_code, derived_stop = "PASS", 0, ""
     logs_complete = True
     while index < len(events) - 1:
         if outcome != 0 or len(steps) >= len(commands):
@@ -200,16 +206,7 @@ def inspect_run(path: Path | None) -> dict[str, Any]:
                 )
             )
             or not isinstance(reason, str)
-            or reason
-            not in {
-                "",
-                "timeout",
-                "cancelled",
-                "log_budget",
-                "execution_unavailable",
-                "execution_record_unavailable",
-                "artifact_record_unavailable",
-            }
+            or reason not in STOP_REASONS
             or (pid is None and not reason)
             or (pid is not None and type(step.get("pid")) is not int)
         ):
@@ -260,14 +257,9 @@ def inspect_run(path: Path | None) -> dict[str, Any]:
             and reason != "log_budget"
         ):
             invalid()
-        if reason in {"timeout", "cancelled", "log_budget"}:
-            outcome = 5
-        elif reason or not step["cleanup_complete"]:
-            outcome = 3
-        elif code != 0:
-            outcome = 4
-        else:
-            outcome = 0
+        derived_status, derived_code, derived_stop = step_outcome(step)
+        if derived_status != "PASS":
+            outcome = derived_code
         steps.append(step)
         index += 1
     status = end.get("status")
@@ -284,24 +276,22 @@ def inspect_run(path: Path | None) -> dict[str, Any]:
     ):
         invalid()
     if outcome:
-        if exit_code != outcome or end.get("stop_code") != (
-            steps[-1]["stop_reason"]
-            or (
-                "cleanup_incomplete"
-                if not steps[-1]["cleanup_complete"]
-                else "child_failed"
-            )
+        if (
+            status != derived_status
+            or exit_code != derived_code
+            or end.get("stop_code") != derived_stop
         ):
             invalid()
     elif len(steps) == len(commands):
-        if exit_code != 0 or end.get("stop_code") != "":
+        if status != "PASS" or exit_code != 0 or end.get("stop_code") != "":
             invalid()
-    elif exit_code not in {3, 5} or end.get("stop_code") not in {
-        "execution_not_started",
-        "execution_precondition_changed",
-        "execution_record_unavailable",
-    }:
-        invalid()
+    else:
+        terminal = end.get("stop_code")
+        if status != "BLOCKED" or (
+            not isinstance(terminal, str)
+            or TERMINAL_STOP_CODES.get(terminal) != exit_code
+        ):
+            invalid()
     return dict(
         status=status,
         exit_code=exit_code,
