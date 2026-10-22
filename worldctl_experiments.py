@@ -223,7 +223,7 @@ def plan(root: Path, options: argparse.Namespace) -> dict[str, Any]:
             "original GPU cleanliness gate",
             "model/dependency compatibility",
             "explicit execution authorization",
-            "bounded executor not implemented",
+            "GPU-enabled executor integration not implemented",
         ],
         output_directory_created=False,
     )
