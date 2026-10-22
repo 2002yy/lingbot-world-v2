@@ -90,6 +90,13 @@ class ExecutionTests(unittest.TestCase):
             result = self.run_child("raise Exception('never')", dry_run=True)
         self.assertFalse(result["execution_started"])
 
+    def test_changed_precondition_stops_before_any_child(self):
+        result = self.run_child(
+            "raise Exception('never')", before_step=lambda argv: False
+        )
+        self.assertEqual(result["exit_code"], 3)
+        self.assertFalse(result["execution_started"])
+
     def test_keyboard_interrupt_cleans_the_owned_child(self):
         original_sleep = time.sleep
         interrupted = []

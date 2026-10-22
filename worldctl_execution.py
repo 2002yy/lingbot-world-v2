@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 import os
 from pathlib import Path
 import signal
@@ -79,6 +80,7 @@ def execute(
     dry_run: bool = False,
     log_limit: int = 1_048_576,
     cancel: threading.Event | None = None,
+    before_step: Callable[[list[str]], bool] | None = None,
 ) -> dict[str, Any]:
     if (
         not math.isfinite(timeout)
@@ -126,6 +128,15 @@ def execute(
                 dict(
                     code="execution_not_started",
                     message="Budget exhausted or cancellation requested before the next child.",
+                )
+            ]
+            break
+        if before_step is not None and not before_step(argv):
+            result.update(status="BLOCKED", exit_code=3)
+            result["errors"] = [
+                dict(
+                    code="execution_precondition_changed",
+                    message="The next trusted child no longer satisfies its admission checks.",
                 )
             ]
             break
