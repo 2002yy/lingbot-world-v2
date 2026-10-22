@@ -29,7 +29,13 @@ Popen失败不再误称已开始。inspect-run只读链/事件/旁边固定名�
 作留存证据，具体临时文件清除机制未确认。改offline CLI默认保存到
 ~/.local/state/worldctl/runs（不改配置），独立0700运行目录/日志/记录均保留在checkout外。
 内部record_root可选；拒绝symlink路径，dry-run不建目录，测试使用自己的临时fixture根。
-新增3项留存/路径检查，最终25脚本298项门与新持久化CLI回执见外部清单。
+新增3项留存/路径检查，最终候选代码d42ea61b8eccff287f969ca6ccb513a0a765fb0f通过25脚本298项；
+Ruff/格式/五模块Linux strict mypy/diff/secret0通过，随后仅文档变更。
+worldctl-record-retention-offline-20261022/summary.json与
+worldctl-record-persistent-e2e-20261022/manifest.json记录11条新实际CLI、
+跨进程留存复验及3份记录/相邻日志的D盘归档副本，源与副本保留0/5/4结果。
+第三片PR #22已从文档改为留存修复+交接，最终HEAD/合并状态从Git/PR恢复。
+主线最终复验见worldctl-record-main-20261022.json（修复前曾失败，不借旧结果）。
 旧临时目录E2E保留为历史样本，不覆盖；新证据另存worldctl-record-persistent-e2e-20261022。
 实际合并/最终主线复验状态由本片最终提交和外部清单恢复；修复是行为变更，重新跑最终门。
 下一唯一功能片：将受控执行记录与产物/配置身份作可追溯关联，先离线fixture，不追认旧运行。
