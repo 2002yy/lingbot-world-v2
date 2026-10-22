@@ -108,7 +108,8 @@ class TestRunTests(unittest.TestCase):
         output = self.root.parent / "receipt.json"
         result = self.run_suite("--output", str(output))
         self.assertEqual(result["exit_code"], 0)
-        self.assertEqual(len(result["artifacts"]), 5)
+        self.assertEqual(len(result["artifacts"]), 6)
+        self.assertIn(result["data"]["execution_record"], result["artifacts"])
         self.assertEqual(result["artifacts"][-1], str(output))
 
 
