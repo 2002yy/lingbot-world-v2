@@ -1,6 +1,21 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接：2026-10-23 run-identity
+## 当前交接：2026-10-23 身份核对集成候选
+
+PR #22 已以固定 head a86aee6799e6a8e61cfd304721325bc3137c5764 合并，main
+97397d3251ee91a7488424c90de10326d6653435。最终干净候选全量25脚本308项通过；
+三项P2修复和P1接受边界逐条回复并关闭。该审阅是本地当前head检查，未冒充独立GitHub批准；
+仓库 workflows/required rules 均0，不冒充远端CI通过。
+P1仍保留同步fsync无硬超时及SIGKILL不自动清理两项已接受限制。
+
+PR #23 从独立分支同步上述已合并main，仅局部合并交接文档，无源码冲突。
+身份模块/CLI保持原功能，执行器/记录消费端使用已合并的修复。
+本提交是新的组合候选，旧305项门不能冒充组合结果；待跑命名影响集及一次全量离线门。
+记录 D:/study-agent-validation/worldctl-run-identity-integration-20261023/。
+下一唯一片：验收组合候选、推送PR #23，核对当前head审阅与必要门再合并；不等CI。
+PR #24 已单独修复私有临时路径符号链接问题，72项聚焦通过，仍独立审阅，不混入本候选。
+
+## 身份功能的独立开发记录（历史基线与门）
 
 独立分支 codex/worldctl-run-identity-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-identity-20261023，
 基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
@@ -28,12 +43,107 @@ static-*.log、secrets.json。全量仅跑一次，后续本提交只改文档�
 下一唯一片：开本分支独立 PR，记录当前 head 的 CI/审阅一次；不等待其他 PR/CI。
 当前 head 审阅及必要门通过前不合并，仓库 main/PR #22 不因本片本地通过自动改变。
 
-## 上次交接
+
+
+## 执行记录修复的开发记录（合并前状态）
+
+本轮只收口四条 execution-record 审阅意见，不增加模型/GPU执行能力。
+分支 `codex/worldctl-record-handoff-20261022`，基线/执行前 HEAD
+`1a9f95928763cc3487644991c50f6f851d94290b`，PR #22 尚未合并。
+阶段 A 已准备五个 Python 文件；本条记录补入第六个文件 `docs/WORLDCTL.md`。
+阶段 B/C 已在 WSL/Linux 真实执行通过；代码与本文档已应用到目标工作树。
+本次直接从 WSL 读取目标：HEAD/13205 字节原版吻合，但工作树当前干净；
+交接提到的四项无关修改已不在当前 diff。仍保存并比较
+eval_two_layer.py、lingbot_fp8.py、run.sh、setup.sh 的字节摘要，不修改或暂存它们。
+
+冻结裁定：Popen → 同步 child_started 写入/flush/fsync → 立即检查截止时间/取消 →
+监督循环。启动确认时间计入同一预算，暴露 `start_confirm_seconds`。
+除 Linux 实测证明真实缺陷，不改成异步模型；四条意见在验收后用一个提交收口，
+不拆散生产端/消费端共享的 `TERMINAL_STOP_CODES` 与 `step_outcome`。
+记录目录/文件创建失败应结构化 BLOCKED3 且不启动子进程；新目录项同步；
+inspect-run 必须严格配对停止原因和退出码，不能用独立允许集合冒充一致性。
+
+两条接受的限制：
+- fsync 没有硬超时。确认窗口计入总预算，只能在调用返回后立即检查和清理；
+  fsync 卡住期间不保证到点终止。同步一次调用不等于有界时间。
+- SIGKILL 不执行 finally；start_new_session 不会在父进程死亡时自动清理孤儿。
+  崩溃探针自己的清理标注 `cleanup_by: probe`，不能算 worldctl 清理保证。
+
+两窗口验收：确认 fsync 后杀父进程，必须保留 child_started、没有终态、inspect 拒绝3；
+写确认前杀父进程，必须标为 uncertain-record-missing，绝不推断未启动。
+两窗口均需证明真实 SIGKILL/PID，探针清理完自身子进程，不能把未触发窗口当 PASS。
+该探针验证进程崩溃可观察性，不模拟断电，不证明磁盘/文件系统跨掉电持久性。
+
+产物集中在 `D:/study-agent-validation/`：源码 worldctl-src/；补丁
+worldctl-review-fix-20261023.patch；原五文件备份 worldctl-review-fix-backup-20261023/；
+崩溃探针 worldctl-crash-probe-20261023.py；执行脚本 worldctl-review-fix-20261023.sh。
+Linux 入口：`bash /mnt/d/study-agent-validation/worldctl-review-fix-20261023.sh`。
+门顺序：精确分支/HEAD/范围断言 → 备份六文件 → 应用六文件 → 比较无关文件摘要 →
+三组 unittest → 两窗口崩溃探针 → 全量 CPU/offline 脚本门。
+输出 worldctl-review-fix-verify-20261023/，已存在时停止而不覆盖。
+脚本不提交；任一失败即停，未通过 Linux 门前不提交或合并。
+之后检查 Ruff/格式/Linux strict mypy、diff 范围，再单提交；PR 当前 head 审阅/必要门
+确认后才能合并，不借旧 head 的检查，不声称 CI 或 GPU/发布验收通过。
+本轮实测：三组 unittest 50 项 PASS；全量 25 脚本 308 项 PASS；
+两窗口均 CLI -9、inspect3、无终态、探针清理成功，分别为 durable 与
+uncertain-record-missing。四个无关文件 SHA256 前后相同。
+Ruff/格式与三生产模块 strict mypy（Linux target）通过；两文件仅格式调整经 AST
+一致性检查，不重复全量门；最终再跑三组 focused 门并保存精确文件摘要。
+全量 summary 的 head 是测试时基线 HEAD，必须结合 validated-source.sha256/applied.patch
+识别当时未提交的受测代码；不能把该 head 当作修复已提交的证据。
+补丁、备份和探针为离线验收附件，Linux 日志在上述 verify 目录；崩溃样本另归档到其
+crash-records/，不依赖 /tmp 留存。单提交/推送后的精确 SHA 从本节所属提交及 PR #22
+恢复；本地验收通过不等于远端审阅通过。未自动合并 main。
+启动确认窗口保留原 P1 讨论指出的同步 fsync 限制，作为接受的边界而非硬超时修复。
+下一唯一执行片：审阅 PR #22 当前修复提交，确认这项接受的边界及其余三条修复后收口。
+
+## 上次交接（2026-10-22）
+
+2026-10-22本轮已交付：PR #20 execution record
+head32c02f0a94687e328677edc46e962c976f1af21f，merge53f00d20da0e3d9c68e5eb529ed83abf90e87869；
+PR #21 offline接线/inspect-run head7597ed920621953da811762298d4948f76ef3048，merge main
+4b5270bb9837628bbefb6e2e8e054d38a542ce1b。均expected-head合并，完整review分页
+无线程/无外部审阅结论；repo无Actions工作流、main保护或有效规则，不冒充CI通过。
+
+第一片24脚本281项PASS，第二片25脚本295项PASS；Ruff/格式/五模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-execution-record-offline-20261022/summary.json 与
+worldctl-run-inspect-offline-20261022/summary.json。
+11条实际CLI worldctl-record-e2e-20261022/manifest.json：真实11脚本offline成功并记录；
+成功/1秒超时/缺numpy失败的记录重验保留0/5/4；改日志FAIL4；截断/旧hashBLOCKED3；
+dry-run无日志或记录、缺参数FAIL2。记录及日志只在隔离临时目录，原community状态不变。
+缺依赖失败是特意用系统Python的环境负例，不当作实现回归；实际正确环境的offline门通过。
+
+记录覆盖实际PID/session启动、UTC时间、单调耗时、退出码、清理状态和日志大小/限额内的SHA（超限仅记大小）；
+逐事件flush/fsync。记录失败不继续启动；终态写失败保留观察到的退出码并阻塞。
+Popen失败不再误称已开始。inspect-run只读链/事件/旁边固定名称日志，不执行所存命令；
+缺结束或成功标题覆盖失败、合并stdout/stderr超预算等都会拒绝。
+记录只证明保存内容的内部一致性，非签名/来源认证；不授予模型/手工关联/发布资格。
+清理仍限拥有的Linux session，不是沙箱，主动脱离session不在保证内。
+
+第三片留存修复/交接：codex/worldctl-record-handoff-20261022。主线4b5270b源码与
+受测7597ed9相同，但复验发现原/tmp两份记录已不存在；旧主线复验未通过，不能借旧文件
+作留存证据，具体临时文件清除机制未确认。改offline CLI默认保存到
+~/.local/state/worldctl/runs（不改配置），独立0700运行目录/日志/记录均保留在checkout外。
+内部record_root可选；拒绝symlink路径，dry-run不建目录，测试使用自己的临时fixture根。
+新增3项留存/路径检查，最终候选代码d42ea61b8eccff287f969ca6ccb513a0a765fb0f通过25脚本298项；
+Ruff/格式/五模块Linux strict mypy/diff/secret0通过，随后仅文档变更。
+worldctl-record-retention-offline-20261022/summary.json与
+worldctl-record-persistent-e2e-20261022/manifest.json记录11条新实际CLI、
+跨进程留存复验及3份记录/相邻日志的D盘归档副本，源与副本保留0/5/4结果。
+第三片PR #22已从文档改为留存修复+交接；旧head的README P2意见要求限定哈希声明，
+现已明确仅限预算内日志，超限无hash且不称已验证。最终HEAD/合并状态从Git/PR恢复。
+主线最终复验见worldctl-record-main-20261022.json（修复前曾失败，不借旧结果）。
+旧临时目录E2E保留为历史样本，不覆盖；新证据另存worldctl-record-persistent-e2e-20261022。
+实际合并/最终主线复验状态由本片最终提交和外部清单恢复；修复是行为变更，重新跑最终门。
+下一唯一功能片：将受控执行记录与产物/配置身份作可追溯关联，先离线fixture，不追认旧运行。
+
+## 本轮第二片开发记录
 
 2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
 不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线
 上下文，artifacts保留日志+execution.jsonl；dry-run仍无目录/子进程/完整记录。
-新增 `test inspect-run --record /tmp/worldctl-run-XXX/execution.jsonl --json`，
+新增 `test inspect-run --record /path/to/execution.jsonl --json`，
 只读4MiB/512事件以内常规非symlink记录，不执行其中命令。校验序号/hash链/时间格式/
 事件顺序/实际启动与退出/停止原因/终态，核对旁边固定命名stdout/stderr的大小和SHA。
 缺结束记录/非法类型/越界路径/伪造成功终态拒绝；日志变化FAIL4、缺失BLOCKED3；

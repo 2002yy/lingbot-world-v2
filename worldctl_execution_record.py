@@ -15,8 +15,60 @@ import uuid
 from worldctl_fingerprint import digest, identity
 
 
+STOP_REASONS = (
+    "",
+    "timeout",
+    "cancelled",
+    "log_budget",
+    "execution_unavailable",
+    "execution_record_unavailable",
+    "artifact_record_unavailable",
+)
+
+TERMINAL_STOP_CODES = {
+    "execution_not_started": 5,
+    "execution_precondition_changed": 3,
+    "execution_record_unavailable": 3,
+}
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def sync_directory(folder: Path) -> None:
+    """Persist the directory entry that names a new journal file.
+
+    fsync on the file alone leaves the entry itself only in the page cache, so a
+    crash can retain zero bytes while the run appears recorded. POSIX is the only
+    platform where a directory can be opened and synced; bounded execution itself
+    already refuses to start elsewhere.
+    """
+    if os.name != "posix":
+        return
+    fd = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def step_outcome(step: dict[str, Any]) -> tuple[str, int, str]:
+    """Single authority mapping one finished step to (status, exit_code, stop_code).
+
+    Recording and inspection both call this so a recorded run cannot report a
+    stop reason that disagrees with its own exit code.
+    """
+    reason = step["stop_reason"]
+    if reason in {"timeout", "cancelled", "log_budget"}:
+        return "BLOCKED", 5, reason
+    if reason:
+        return "BLOCKED", 3, reason
+    if not step["cleanup_complete"]:
+        return "BLOCKED", 3, "cleanup_incomplete"
+    if step["child_exit_code"] != 0:
+        return "FAIL", 4, "child_failed"
+    return "PASS", 0, ""
 
 
 class Journal:
@@ -29,6 +81,11 @@ class Journal:
         self.sequence = 0
         self.healthy = True
         self.path.touch(exist_ok=False)
+        try:
+            sync_directory(folder)
+        except OSError:
+            self.healthy = False
+            raise
 
     def emit(self, event: str, **data: Any) -> bool:
         if not self.healthy:

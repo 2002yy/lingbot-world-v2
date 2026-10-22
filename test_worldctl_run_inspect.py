@@ -3,7 +3,9 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -185,6 +187,92 @@ class RunInspectTests(unittest.TestCase):
             result = execute(self.root, [[str(self.root / "missing")]], 2, record=True)
         record = inspect_run(Path(result["execution_record"]))
         self.assertEqual(record["exit_code"], 3)
+
+
+class RecordedOutcomeTests(unittest.TestCase):
+    """Stop code, exit code and status must agree without any live child.
+
+    Reading a record compares fstat against lstat identity, which only agrees on
+    POSIX; elsewhere every record is rejected before pairing can be checked.
+    """
+
+    def record(self, end):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        events = [
+            (
+                "run_started",
+                dict(
+                    commands=[["step"]],
+                    log_limit=1024,
+                    context={},
+                    budget_seconds=5,
+                    origin_authenticated=False,
+                    release_qualified=False,
+                ),
+            ),
+            ("run_finished", end),
+        ]
+        run_id = "a" * 32
+        previous = None
+        lines = []
+        for index, (name, data) in enumerate(events):
+            item = dict(
+                schema_version=1,
+                run_id=run_id,
+                seq=index,
+                event=name,
+                recorded_at=f"2026-10-22T00:00:0{index}+00:00",
+                elapsed_seconds=float(index),
+                previous_sha256=previous,
+                data=data,
+            )
+            item["sha256"] = digest(item)
+            previous = item["sha256"]
+            lines.append(json.dumps(item))
+        path = folder / "execution.jsonl"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def blocked(self, path):
+        with self.assertRaises(worldctl.CLIError):
+            inspect_run(path)
+
+    @unittest.skipUnless(os.name == "posix", "record identity checks are POSIX-only")
+    def test_consistent_terminal_pairing_is_accepted(self):
+        for stop_code, exit_code in [
+            ("execution_not_started", 5),
+            ("execution_precondition_changed", 3),
+            ("execution_record_unavailable", 3),
+        ]:
+            path = self.record(
+                dict(
+                    status="BLOCKED",
+                    exit_code=exit_code,
+                    step_count=0,
+                    execution_started=False,
+                    stop_code=stop_code,
+                )
+            )
+            self.assertEqual(inspect_run(path)["exit_code"], exit_code)
+
+    @unittest.skipUnless(os.name == "posix", "record identity checks are POSIX-only")
+    def test_lookalike_terminal_pairing_is_rejected(self):
+        for stop_code, exit_code in [
+            ("execution_precondition_changed", 5),
+            ("execution_not_started", 3),
+            ("execution_record_unavailable", 5),
+        ]:
+            path = self.record(
+                dict(
+                    status="BLOCKED",
+                    exit_code=exit_code,
+                    step_count=0,
+                    execution_started=False,
+                    stop_code=stop_code,
+                )
+            )
+            self.blocked(path)
 
 
 if __name__ == "__main__":
