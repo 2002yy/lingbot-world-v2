@@ -202,11 +202,14 @@ def memory_result(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def inspect_result(root: Path, options: argparse.Namespace) -> dict[str, Any]:
-    if options.experiment != "memory-gate" or options.result is None:
+    if (
+        options.experiment not in {"memory-gate", "preview-handoff"}
+        or options.result is None
+    ):
         raise CLIError(
             2,
             "invalid_result_selection",
-            "Select experiment inspect --experiment memory-gate --result FILE.",
+            "Select experiment inspect --experiment memory-gate or preview-handoff --result FILE.",
         )
     source = entry(root, options.experiment)
     if not source["source_matches"]:
@@ -216,7 +219,12 @@ def inspect_result(root: Path, options: argparse.Namespace) -> dict[str, Any]:
             "The registered historical writer/reference must match its reviewed source.",
         )
     raw, sha = read_result(options.result)
-    result = memory_result(raw)
+    if options.experiment == "preview-handoff":
+        from worldctl_preview_result import preview_result
+
+        result = preview_result(raw)
+    else:
+        result = memory_result(raw)
     result.update(
         experiment=options.experiment,
         writer_sha256=source["sha256"],

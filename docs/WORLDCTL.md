@@ -2,6 +2,20 @@
 
 ## 当前交接
 
+2026-10-22第二片：codex/worldctl-preview-result-20261022，以已提交fb46d46为父，
+不依赖其他工作树WIP。新增同一inspect入口的 `--experiment preview-handoff`。
+从逐scene/chunk重算距离比值、错误方向/overshoot/gross计数、整体/start/steady中位数。
+未知方向或零baseline导致的NaN保留为缺失，输出合法JSON null并BLOCKED/3，
+不能因为wrong_direction=0就判方向正确。缺字段/坏链/类型错BLOCKED3，汇总或公式矛盾FAIL4。
+完整一致返回PASS0仅代表检视通过；即使记录含错误方向仍保留负面发现，不是质量验收。
+原脚本空group会回退到全部rows，显式报告真实group样本数和fallback；原else文案可能
+在wrong=0时也声称有错误方向，显式标记该误报，不改原脚本/结果/判定阈值。
+检视不重算图像/latent指标，不证明来源/进程完成/当前部署或人工呈现通过。
+新增14项测试与内存14项通过；第一片完整20脚本229项通过，第二片最终门见外部清单。
+下一唯一片：给结果与配置/输入指纹提供显式关联；缺少执行证据时保留未绑定状态。
+
+## 本轮第一片开发记录
+
 2026-10-22本轮第一片：codex/worldctl-memory-result-20261022，base main
 c8b380af9f66ad9483202e065a53da5ad36bb120。新增
 `experiment inspect --experiment memory-gate --result /path/m0.json --json`。
