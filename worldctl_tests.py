@@ -90,6 +90,10 @@ def run(root: Path, options: argparse.Namespace) -> dict[str, Any]:
         options.timeout,
         dry_run=getattr(options, "dry_run", False),
         before_step=guard,
+        record=True,
+        record_context=dict(
+            suite="offline", execution_head_sha=head, source_baseline=BASELINE
+        ),
     )
     result.update(
         suite="offline",

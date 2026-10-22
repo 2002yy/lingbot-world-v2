@@ -2,6 +2,21 @@
 
 ## 当前交接
 
+2026-10-22第二片：codex/worldctl-run-inspect-20261022，固定已提交32c02f0，
+不依赖其他工作树WIP。offline test run默认启用执行记录并写入suite/执行HEAD/基线
+上下文，artifacts保留日志+execution.jsonl；dry-run仍无目录/子进程/完整记录。
+新增 `test inspect-run --record /tmp/worldctl-run-XXX/execution.jsonl --json`，
+只读4MiB/512事件以内常规非symlink记录，不执行其中命令。校验序号/hash链/时间格式/
+事件顺序/实际启动与退出/停止原因/终态，核对旁边固定命名stdout/stderr的大小和SHA。
+缺结束记录/非法类型/越界路径/伪造成功终态拒绝；日志变化FAIL4、缺失BLOCKED3；
+完整记录保留原失败4/超时5，日志超限保留5且不声称全部hash验证。
+检查的是保存记录与文件一致性，不认证执行来源，也不升级任何手工关联/模型/发布资格。
+原cleanup仅限拥有的Linux session，不是沙箱；写失败/原始观察码分别报告。
+14项新消费端检查+13项记录端检查通过，第一片完整24脚本281项通过；最终门见外部清单。
+下一唯一片：将受控执行记录与产物/配置身份作可追溯关联，先离线fixture，不追认旧运行。
+
+## 本轮第一片开发记录
+
 2026-10-22本轮第一片：codex/worldctl-execution-record-20261022，从main
 aa47ead58469f1d62dd6fe7b87c08d84ed6eed5e独立开发。内部execute增加可选record，
 默认不改变现有调用。开启时在隔离日志目录逐步flush/fsync execution.jsonl：

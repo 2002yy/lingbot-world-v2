@@ -67,6 +67,9 @@ def parser_for_cli() -> Parser:
     common(run)
     run.add_argument("--suite", default="")
     run.add_argument("--timeout", type=int)
+    inspect_run = tests.add_parser("inspect-run", add_help=False)
+    common(inspect_run)
+    inspect_run.add_argument("--record", type=Path)
     experiment = commands.add_parser("experiment", add_help=False)
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
@@ -273,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
                     "doctor",
                     "gpu check",
                     "test run",
+                    "test inspect-run",
                     "experiment list",
                     "experiment plan",
                     "experiment preflight",
@@ -299,10 +303,15 @@ def main(argv: list[str] | None = None) -> int:
                 for key in ("status", "exit_code", "errors"):
                     result[key] = result["data"][key]
             elif options.command == "test":
-                from worldctl_tests import run as run_tests
-
                 result["command"] = "test " + (options.test_command or "")
-                result["data"] = run_tests(root, options)
+                if options.test_command == "inspect-run":
+                    from worldctl_run_inspect import inspect_run
+
+                    result["data"] = inspect_run(options.record)
+                else:
+                    from worldctl_tests import run as run_tests
+
+                    result["data"] = run_tests(root, options)
                 for key in ("status", "exit_code", "errors", "artifacts"):
                     result[key] = result["data"][key]
             elif options.command == "experiment":
