@@ -71,12 +71,16 @@ def parser_for_cli() -> Parser:
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
     common(experiments.add_parser("list", add_help=False))
-    for name in ("plan", "preflight"):
+    for name in ("plan", "preflight", "fingerprint"):
         plan = experiments.add_parser(name, add_help=False)
         experiment_options(plan)
-        if name == "preflight":
+        if name in {"preflight", "fingerprint"}:
             plan.add_argument("--purpose", default="")
             plan.add_argument("--trusted-inputs", action="store_true")
+        if name == "fingerprint":
+            plan.add_argument("--max-bytes", type=int)
+            plan.add_argument("--max-files", type=int)
+            plan.add_argument("--hash-timeout", type=int)
     return parser
 
 
@@ -253,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                     "experiment list",
                     "experiment plan",
                     "experiment preflight",
+                    "experiment fingerprint",
                     "help",
                 ],
                 side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
@@ -280,14 +285,23 @@ def main(argv: list[str] | None = None) -> int:
             elif options.command == "experiment":
                 from worldctl_experiments import catalogue, plan as experiment_plan
 
-                if options.experiment_command not in {"list", "plan", "preflight"}:
+                if options.experiment_command not in {
+                    "list",
+                    "plan",
+                    "preflight",
+                    "fingerprint",
+                }:
                     raise CLIError(
                         2,
                         "missing_experiment_command",
                         "Select experiment list, plan or preflight.",
                     )
                 result["command"] = "experiment " + options.experiment_command
-                if options.experiment_command == "preflight":
+                if options.experiment_command == "fingerprint":
+                    from worldctl_fingerprint import fingerprint
+
+                    result["data"] = fingerprint(root, options)
+                elif options.experiment_command == "preflight":
                     from worldctl_preflight import preflight
 
                     result["data"] = preflight(root, options)
