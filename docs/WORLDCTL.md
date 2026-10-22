@@ -2,6 +2,21 @@
 
 ## 当前交接
 
+2026-10-22本轮第一片：codex/worldctl-memory-result-20261022，base main
+c8b380af9f66ad9483202e065a53da5ad36bb120。新增
+`experiment inspect --experiment memory-gate --result /path/m0.json --json`。
+只读历史原始JSON（4MiB、常规非symlink文件、重复键/变化/非法类型拒绝），不运行脚本。
+固定原65 chunks / chunk_size 3 / bf16 / temporal_stability_8_2，核对5个内存点和
+65个连续chunk，逐项重算增长<2%、margin>=500MiB以及原时延统计。
+数值门失败或汇总与rows不符返回FAIL/4，缺失/未知格式BLOCKED/3；
+头部overall=PASS不覆盖原始数据失败。没有process-exit记录，不能独立证明no-OOM。
+保留原脚本与门；明确原ttfnf_p50_ms实际是排除warmup的均值，另算真实中位数，
+不把旧标签误报为p50。历史JSON未绑定输入/代码/seed/geometry/GPU清洁快照，
+检视PASS不授予当前部署、执行或发布资格。14项新增自测通过；最终门/回执见清单。
+下一片：预览交接原始结果，重算计数与汇总，并把NaN缺失与0错误方向分开。
+
+## 上一轮交付
+
 2026-10-22本轮已交付：PR #11 fingerprint head40d3eeb3fbba5bb1b704fa78c6c849724b4926d5，
 merge ac248b23c2ee268e2b8bd02043c3c14690dd8814；PR #12 compare
 head1cc2fae55e29dad815da977e6eff519c9c09a272，merge main

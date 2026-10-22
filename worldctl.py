@@ -71,6 +71,10 @@ def parser_for_cli() -> Parser:
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
     common(experiments.add_parser("list", add_help=False))
+    inspect = experiments.add_parser("inspect", add_help=False)
+    common(inspect)
+    inspect.add_argument("--experiment", default="")
+    inspect.add_argument("--result", type=Path)
     compare = experiments.add_parser("compare", add_help=False)
     common(compare)
     compare.add_argument("--left", type=Path)
@@ -263,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                     "experiment preflight",
                     "experiment fingerprint",
                     "experiment compare",
+                    "experiment inspect",
                     "help",
                 ],
                 side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
@@ -296,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
                     "preflight",
                     "fingerprint",
                     "compare",
+                    "inspect",
                 }:
                     raise CLIError(
                         2,
@@ -303,7 +309,11 @@ def main(argv: list[str] | None = None) -> int:
                         "Select experiment list, plan or preflight.",
                     )
                 result["command"] = "experiment " + options.experiment_command
-                if options.experiment_command == "compare":
+                if options.experiment_command == "inspect":
+                    from worldctl_result import inspect_result
+
+                    result["data"] = inspect_result(root, options)
+                elif options.experiment_command == "compare":
                     from worldctl_compare import compare
 
                     result["data"] = compare(options)
