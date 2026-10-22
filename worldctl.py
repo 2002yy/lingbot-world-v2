@@ -54,6 +54,12 @@ def parser_for_cli() -> Parser:
     commands = parser.add_subparsers(dest="command")
     for name in ("status", "doctor", "help"):
         common(commands.add_parser(name, add_help=False))
+    gpu = commands.add_parser("gpu", add_help=False)
+    common(gpu)
+    gpu_commands = gpu.add_subparsers(dest="gpu_command")
+    gpu_check = gpu_commands.add_parser("check", add_help=False)
+    common(gpu_check)
+    gpu_check.add_argument("--timeout", type=int)
     test = commands.add_parser("test", add_help=False)
     common(test)
     tests = test.add_subparsers(dest="test_command")
@@ -242,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                 commands=[
                     "status",
                     "doctor",
+                    "gpu check",
                     "test run",
                     "experiment list",
                     "experiment plan",
@@ -256,7 +263,14 @@ def main(argv: list[str] | None = None) -> int:
             root, target_head = repository(getattr(options, "repo", ROOT))
             _, result["head_sha"] = repository(ROOT)
             result["command"] = options.command
-            if options.command == "test":
+            if options.command == "gpu":
+                from worldctl_gpu import check as check_gpu
+
+                result["command"] = "gpu " + (options.gpu_command or "")
+                result["data"] = check_gpu(root, options)
+                for key in ("status", "exit_code", "errors"):
+                    result[key] = result["data"][key]
+            elif options.command == "test":
                 from worldctl_tests import run as run_tests
 
                 result["command"] = "test " + (options.test_command or "")
