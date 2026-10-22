@@ -2,6 +2,34 @@
 
 ## 当前交接
 
+2026-10-22本轮已交付：PR #11 fingerprint head40d3eeb3fbba5bb1b704fa78c6c849724b4926d5，
+merge ac248b23c2ee268e2b8bd02043c3c14690dd8814；PR #12 compare
+head1cc2fae55e29dad815da977e6eff519c9c09a272，merge main
+8ed7dbb0be76a56dec97a0df20700ec63611d869。两片均expected-head合并，完整review
+分页无线程/无外部审阅结论；repo没有Actions工作流、main保护或有效规则，不冒充CI通过。
+第一片18脚本203项PASS，最终第二片19脚本215项PASS；Ruff/格式/三模块Linux
+strict mypy/diff/secret0通过。证据 D:/study-agent-validation 下
+worldctl-fingerprint-offline-20261022/summary.json 与
+worldctl-compare-final-20261022/summary.json。比较代码复查修复Python把42.0与42
+视为相等的类型漏洞，回执要求精确整数类型；新候选重跑一次完整门。
+
+真实10条CLI回执 worldctl-fingerprint-e2e-20261022/manifest.json：用明确标注的合成
+非模型/非张量文件生成两份相同指纹并比较PASS；改字节后比较FAIL/4且仅inputs不同；
+篡改回执旧hash被BLOCKED/3；dry-run不hash；不足/缺少预算拒绝；既有真实模型路径
+用1字节预算在读取前拒绝，不声称真实模型/张量资格。原真实输入stat及community状态
+保持，没有GPU/网络/模型执行。main整树与受测1cc2fae相同，status/list/历史指纹比较
+三例通过，原1259个未跟踪文件保留；worldctl-fingerprint-main-20261022.json。
+当前文档片codex/worldctl-fingerprint-handoff-20261022只补说明和README入口；
+最终SHA/PR由Git恢复，不因文档重复相同源码全套。
+
+用experiment fingerprint时沿用preflight参数并明确设置--max-bytes/--max-files/
+--hash-timeout，再用--output保存checkout外新回执；比较见下一节命令。
+哈希只绑定快照内容，不认证作者或来源，不保证之后输入未变。相同仅指回执记录的
+静态条件相同；没有观察或比较真实实验结果，不提供执行/发布许可。
+下一唯一片：检查已登记历史实验的原始结果文件并明确其证据范围，不执行新GPU实验。
+
+## 本轮第二片开发记录
+
 2026-10-22第二片：codex/worldctl-compare-20261022，以已提交40d3eeb为父，
 不依赖其他工作树WIP。新增
 `experiment compare --left /path/left.json --right /path/right.json --json`。
