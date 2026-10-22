@@ -2,6 +2,21 @@
 
 ## 当前交接
 
+2026-10-22下一轮第一片：codex/worldctl-preflight-20261022，从干净main
+151f00cb9053e4946dac98f0b45198b55b75d2d8独立开发。
+`experiment preflight`沿用plan的输入选项，另要求 `--purpose` 和
+`--trusted-inputs`。只允许实际干净CLI checkout，不接受祖先.env；检查输入
+非空、无symlink路径、依赖包元数据及原脚本固定的 ~/ai/taehv/taehv.py。
+读取输入stat，不读取/反序列化张量，不导入torch/wan/taehv，不查GPU、不建输出目录。
+PASS只证明静态前置检查通过；信任确认不是来源证明，兼容性尚未验证，
+runtime_started/execution_authorized/release_qualified仍false，不能据此启动实验。
+10项新检查+直接CLI影响集通过；完整门及最终提交从Git和本轮外部清单恢复。
+测试曾误用unittest discover递归导入wan，系统Python缺easydict；改为仓库现役
+逐脚本入口后通过，没有修改模型依赖或生产代码来迎合错误测试命令。
+下一片：只读GPU检查，复用冻结700/6000 MiB阈值，不启动模型。
+
+## 前一轮交付
+
 2026-10-22：本轮两个独立功能片，执行器 codex/worldctl-execution-20261022
 从 main 7eff1b3bb5f4c8b3bd498f51e15043e921761d26 开始；CLI 接线
 codex/worldctl-test-run-20261022 固定已提交父片 feeae71caba05c0cdbd4203a78c1e7369281a6f2。

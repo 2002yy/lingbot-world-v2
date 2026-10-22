@@ -65,7 +65,16 @@ def parser_for_cli() -> Parser:
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
     common(experiments.add_parser("list", add_help=False))
-    plan = experiments.add_parser("plan", add_help=False)
+    for name in ("plan", "preflight"):
+        plan = experiments.add_parser(name, add_help=False)
+        experiment_options(plan)
+        if name == "preflight":
+            plan.add_argument("--purpose", default="")
+            plan.add_argument("--trusted-inputs", action="store_true")
+    return parser
+
+
+def experiment_options(plan: Parser) -> None:
     common(plan)
     plan.add_argument("--experiment", default="")
     plan.add_argument("--timeout", type=int)
@@ -76,7 +85,6 @@ def parser_for_cli() -> Parser:
     plan.add_argument("--assets", type=Path)
     plan.add_argument("--base", type=Path)
     plan.add_argument("--y-cache", type=Path)
-    return parser
 
 
 def git(root: Path, *args: str) -> str:
@@ -237,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
                     "test run",
                     "experiment list",
                     "experiment plan",
+                    "experiment preflight",
                     "help",
                 ],
                 side_effects="test run executes offline checks and writes isolated logs; --output writes a report",
@@ -257,18 +266,23 @@ def main(argv: list[str] | None = None) -> int:
             elif options.command == "experiment":
                 from worldctl_experiments import catalogue, plan as experiment_plan
 
-                if options.experiment_command not in {"list", "plan"}:
+                if options.experiment_command not in {"list", "plan", "preflight"}:
                     raise CLIError(
                         2,
                         "missing_experiment_command",
-                        "Select experiment list or plan.",
+                        "Select experiment list, plan or preflight.",
                     )
                 result["command"] = "experiment " + options.experiment_command
-                result["data"] = (
-                    catalogue(root)
-                    if options.experiment_command == "list"
-                    else experiment_plan(root, options)
-                )
+                if options.experiment_command == "preflight":
+                    from worldctl_preflight import preflight
+
+                    result["data"] = preflight(root, options)
+                else:
+                    result["data"] = (
+                        catalogue(root)
+                        if options.experiment_command == "list"
+                        else experiment_plan(root, options)
+                    )
                 for key in ("status", "exit_code", "errors"):
                     result[key] = result["data"][key]
             else:
