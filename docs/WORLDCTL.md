@@ -1,6 +1,67 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接：2026-10-23 身份核对集成候选
+## 当前交接：2026-10-23 归档功能集成候选
+
+PR #22/#23 已合并，基线 main e32425aff46947c40ca652f3786d67e488fdada5。
+PR #24 同步该main，局部合并worldctl.py与交接文档，保留原身份核对参数/分发，
+补入archive-run/inspect-archive，不覆盖丢掉已有命令。私有临时根resolve修复保留，
+外部输入symlink拒绝规则保持不变；现有同步fsync/SIGKILL接受边界保持不变。
+本次归档生产模块与测试字节未改，执行器/reader使用已合并修复；这是新的组合候选，
+组合候选 cc69eb01fe6137a3edf33220c3e9f127cf34bf44 已在干净精确HEAD通过：
+组合影响集95项、完整27脚本333项；7个实际CLI场景（复用既有真实offline记录）通过，
+包括保留身份核对/错误提交拒绝、归档生成/副本检视/不覆盖/dry-run/help命令并存。
+Ruff/格式、CLI+归档模块strict Linux mypy通过；本地当前范围审阅无新增问题，
+不冒充独立GitHub批准或CI成功。本提交只补文档，生产/测试字节不变，不重复全量。
+证据 D:/study-agent-validation/worldctl-run-archive-integration-20261023/。
+PR #24 本地候选已完成；推送后仅查询当前HEAD审阅/必要CI一次，固定HEAD合入。
+最终提交/合并状态从本节所属提交及PR #24恢复，不把本地门等同已合并。
+下一唯一片：从已合并main独立推进inspect-archive的预期提交/套件核对。
+未运行模型/GPU，不授予归档运行来源或实验输入消费权威；不等待CI轮询。
+
+## 归档独立开发及审阅修复记录（历史基线与门）
+
+本次后续：PR #24 的 P2 discussion_r4351731025 已复现并修复。
+私有解包目录先 resolve 再交给现有只读 reader；外部输入的 symlink 拒绝规则保持不变。
+用符号链接临时父目录的新回归，在旧代码上稳定 execution_record_incomplete；修复后
+命名影响集72项 PASS，Ruff/格式/新模块 strict Linux mypy通过。
+证据 D:/study-agent-validation/worldctl-archive-temp-review-20261023/。
+这是有界审阅修复，未重复全量；下面309项全量只属于旧代码候选。
+修复提交推送后等待当前head审阅；进入最终合并候选时再跑一次完整离线门。
+当前 PR #24 OPEN；#22/#23 另按各自候选收口，不依赖其未提交改动。
+
+独立分支 codex/worldctl-run-archive-20261023，工作树 /home/zhang/ai/lingbot-worldctl-run-archive-20261023，
+基线 main 4b5270bb9837628bbefb6e2e8e054d38a542ce1b。未读取或依赖 PR #22 的 WIP；
+未修改已有执行器/记录格式/inspect-run内部校验。PR #22 已知审阅问题仍由其分支处理，
+本片不宣称那些问题已在 main 修复。实现完成，命名影响集 71 项 PASS；Ruff/格式与新模块+CLI strict Linux mypy 通过。
+候选已在干净精确 HEAD 跑完一次全量离线门；未声称 CI/审阅/合并通过。验证目录
+D:/study-agent-validation/worldctl-run-archive-verify-20261023/，本节所属提交恢复候选SHA。
+新增 test archive-run --record execution.jsonl --output new-archive.json --json；
+将完整记录与限额内所有 stdout/stderr 字节打包为自包含JSON回执，逐文件SHA和总摘要。
+新增 test inspect-archive --archive new-archive.json --json，不依赖原目录重新检视副本，
+不重放命令。保留子进程 FAIL4/超时5，不因归档成功升级实验结果。
+最多257文件/合计5MiB，读取回执上限8MiB；拒绝缺失/篡改/超限/路径越界/重复条目/
+symlink，不覆盖已存在 output。仅接受日志hash完整的记录，不截断后冒充完整归档。
+dry-run 不生成完整归档或输出回执；会用自动清除的私有临时目录核对副本。
+归档含所选日志原文（base64），是调用方明确选择导出的数据；不是脱敏报告。
+这是文件/日志一致性，不是来源签名、断电持久性、模型输入消费或发布资格证明。
+
+影响集：新模块测试 + test_worldctl_run_inspect/test_worldctl_execution_record/
+test_worldctl_execution/test_worldctl_test_run/test_worldctl；
+最终候选一次全部离线脚本、Ruff/格式/新模块与CLI strict mypy、diff/范围/无关工作树保护。
+不运行模型/GPU，不追认历史实验来源，不等待其他 CI。
+本地关闭：候选 e39f63e2a58a16c79cddd947c23ac353c5c22ba5，完整 26 脚本 309 项 PASS，
+真实 CLI 5 场景 PASS；Ruff/格式/新模块+CLI strict Linux mypy/diff/密钥扫描0。
+具体见上述目录 candidate.json、focused.json、offline/summary.json、e2e-manifest.json、
+static-*.log、secrets.json。全量仅跑一次，后续本提交只改文档，生产/测试源码字节不变；
+最终 head 由本节所属提交恢复，不把旧 head 的 CI 借给新 head。
+真实 offline 执行本来就把子日志转发 stderr；首次 E2E 错把它当成只读命令要求空 stderr，
+修正验证脚本区分执行/检视后通过，未为验证脚本的错误断言修改业务代码。
+下一唯一片：开本分支独立 PR，记录当前 head 的 CI/审阅一次；不等待其他 PR/CI。
+当前 head 审阅及必要门通过前不合并，仓库 main/PR #22 不因本片本地通过自动改变。
+
+
+
+## 身份功能与执行记录集成记录
 
 PR #22 已以固定 head a86aee6799e6a8e61cfd304721325bc3137c5764 合并，main
 97397d3251ee91a7488424c90de10326d6653435。最终干净候选全量25脚本308项通过；
