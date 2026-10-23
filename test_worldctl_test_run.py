@@ -25,6 +25,7 @@ class TestRunTests(unittest.TestCase):
             (tests, "ROOT", self.root),
             (tests, "BASELINE", self.head),
             (tests, "SCRIPTS", ("test_one.py", "test_two.py")),
+            (tests, "RECORD_ROOT", self.root.parent / "records"),
         ]:
             item = patch.object(module, name, value)
             item.start()
@@ -52,6 +53,10 @@ class TestRunTests(unittest.TestCase):
             [x["child_exit_code"] for x in result["data"]["steps"]], [0, 0]
         )
         self.assertFalse(result["data"]["runtime_started"])
+        self.assertTrue(result["data"]["execution_record_complete"])
+        self.assertTrue(
+            str(result["data"]["execution_record"]).startswith(str(tests.RECORD_ROOT))
+        )
 
     def test_bad_selector_has_no_child(self):
         self.assertEqual(self.invoke("test", "run")["exit_code"], 2)

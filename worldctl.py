@@ -70,6 +70,8 @@ def parser_for_cli() -> Parser:
     inspect_run = tests.add_parser("inspect-run", add_help=False)
     common(inspect_run)
     inspect_run.add_argument("--record", type=Path)
+    inspect_run.add_argument("--expected-head")
+    inspect_run.add_argument("--expected-suite")
     archive_run = tests.add_parser("archive-run", add_help=False)
     common(archive_run)
     archive_run.add_argument("--record", type=Path)
@@ -321,9 +323,13 @@ def main(argv: list[str] | None = None) -> int:
 
                     result["data"] = inspect_archive(options.archive)
                 elif options.test_command == "inspect-run":
-                    from worldctl_run_inspect import inspect_run
+                    from worldctl_run_identity import inspect_identity
 
-                    result["data"] = inspect_run(options.record)
+                    result["data"] = inspect_identity(
+                        options.record,
+                        expected_head=options.expected_head,
+                        expected_suite=options.expected_suite,
+                    )
                 else:
                     from worldctl_tests import run as run_tests
 

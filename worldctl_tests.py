@@ -11,6 +11,7 @@ from worldctl import CLIError, ROOT, git
 from worldctl_execution import execute
 
 BASELINE = "7eff1b3bb5f4c8b3bd498f51e15043e921761d26"
+RECORD_ROOT = Path.home() / ".local/state/worldctl/runs"
 SCRIPTS = (
     "test_camera_import.py",
     "test_commit_before_mark.py",
@@ -91,6 +92,7 @@ def run(root: Path, options: argparse.Namespace) -> dict[str, Any]:
         dry_run=getattr(options, "dry_run", False),
         before_step=guard,
         record=True,
+        record_root=RECORD_ROOT,
         record_context=dict(
             suite="offline", execution_head_sha=head, source_baseline=BASELINE
         ),
