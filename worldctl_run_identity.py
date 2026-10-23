@@ -10,12 +10,9 @@ from worldctl import CLIError
 from worldctl_run_inspect import inspect_run
 
 
-def inspect_identity(
-    record: Path | None,
-    *,
-    expected_head: str | None = None,
-    expected_suite: str | None = None,
-) -> dict[str, Any]:
+def validate_expectations(
+    expected_head: str | None, expected_suite: str | None
+) -> None:
     if (
         expected_head is not None
         and re.fullmatch(r"[0-9a-f]{40}", expected_head) is None
@@ -28,7 +25,15 @@ def inspect_identity(
             "invalid_run_identity",
             "Use a full lowercase 40-character commit and a 1-64 character suite name.",
         )
-    result = inspect_run(record)
+
+
+def match_identity(
+    result: dict[str, Any],
+    *,
+    expected_head: str | None = None,
+    expected_suite: str | None = None,
+) -> dict[str, Any]:
+    validate_expectations(expected_head, expected_suite)
     requested = {
         key: value
         for key, value in {
@@ -68,3 +73,15 @@ def inspect_identity(
             ],
         )
     return result
+
+
+def inspect_identity(
+    record: Path | None,
+    *,
+    expected_head: str | None = None,
+    expected_suite: str | None = None,
+) -> dict[str, Any]:
+    validate_expectations(expected_head, expected_suite)
+    return match_identity(
+        inspect_run(record), expected_head=expected_head, expected_suite=expected_suite
+    )

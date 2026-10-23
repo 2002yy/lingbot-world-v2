@@ -78,6 +78,8 @@ def parser_for_cli() -> Parser:
     inspect_archive = tests.add_parser("inspect-archive", add_help=False)
     common(inspect_archive)
     inspect_archive.add_argument("--archive", type=Path)
+    inspect_archive.add_argument("--expected-head")
+    inspect_archive.add_argument("--expected-suite")
     experiment = commands.add_parser("experiment", add_help=False)
     common(experiment)
     experiments = experiment.add_subparsers(dest="experiment_command")
@@ -321,7 +323,11 @@ def main(argv: list[str] | None = None) -> int:
                 elif options.test_command == "inspect-archive":
                     from worldctl_run_archive import inspect_archive
 
-                    result["data"] = inspect_archive(options.archive)
+                    result["data"] = inspect_archive(
+                        options.archive,
+                        expected_head=options.expected_head,
+                        expected_suite=options.expected_suite,
+                    )
                 elif options.test_command == "inspect-run":
                     from worldctl_run_identity import inspect_identity
 

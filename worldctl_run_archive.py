@@ -18,6 +18,7 @@ from worldctl import CLIError
 from worldctl_compare import pairs
 from worldctl_fingerprint import digest, identity
 from worldctl_run_inspect import inspect_run
+from worldctl_run_identity import match_identity, validate_expectations
 
 MAX_BYTES = 5 * 1024**2
 MAX_REPORT = 8 * 1024**2
@@ -178,7 +179,13 @@ def archive_run(options: argparse.Namespace) -> dict[str, Any]:
     return verified
 
 
-def inspect_archive(path: Path | None) -> dict[str, Any]:
+def inspect_archive(
+    path: Path | None,
+    *,
+    expected_head: str | None = None,
+    expected_suite: str | None = None,
+) -> dict[str, Any]:
+    validate_expectations(expected_head, expected_suite)
     if path is None:
         raise CLIError(
             2,
@@ -203,6 +210,8 @@ def inspect_archive(path: Path | None) -> dict[str, Any]:
             or envelope["exit_code"] != result["exit_code"]
         ):
             invalid()
-        return result
+        return match_identity(
+            result, expected_head=expected_head, expected_suite=expected_suite
+        )
     except (KeyError, ValueError, TypeError, RecursionError):
         invalid()
