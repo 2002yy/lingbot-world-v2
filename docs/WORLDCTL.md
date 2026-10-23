@@ -7,9 +7,15 @@ PR #24 同步该main，局部合并worldctl.py与交接文档，保留原身份�
 补入archive-run/inspect-archive，不覆盖丢掉已有命令。私有临时根resolve修复保留，
 外部输入symlink拒绝规则保持不变；现有同步fsync/SIGKILL接受边界保持不变。
 本次归档生产模块与测试字节未改，执行器/reader使用已合并修复；这是新的组合候选，
-必须跑组合影响集及一次全量，旧309/318门不能冒充本组合结果。
+组合候选 cc69eb01fe6137a3edf33220c3e9f127cf34bf44 已在干净精确HEAD通过：
+组合影响集95项、完整27脚本333项；7个实际CLI场景（复用既有真实offline记录）通过，
+包括保留身份核对/错误提交拒绝、归档生成/副本检视/不覆盖/dry-run/help命令并存。
+Ruff/格式、CLI+归档模块strict Linux mypy通过；本地当前范围审阅无新增问题，
+不冒充独立GitHub批准或CI成功。本提交只补文档，生产/测试字节不变，不重复全量。
 证据 D:/study-agent-validation/worldctl-run-archive-integration-20261023/。
-下一唯一片：完成组合门并以当前HEAD保护合入PR #24；随后独立推进归档预期身份核对。
+PR #24 本地候选已完成；推送后仅查询当前HEAD审阅/必要CI一次，固定HEAD合入。
+最终提交/合并状态从本节所属提交及PR #24恢复，不把本地门等同已合并。
+下一唯一片：从已合并main独立推进inspect-archive的预期提交/套件核对。
 未运行模型/GPU，不授予归档运行来源或实验输入消费权威；不等待CI轮询。
 
 ## 归档独立开发及审阅修复记录（历史基线与门）
