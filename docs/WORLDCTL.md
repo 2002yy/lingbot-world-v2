@@ -1,6 +1,31 @@
 # worldctl：LingBot 命令行入口
 
-## 当前交接：2026-10-23 归档功能集成候选
+## 当前交接：2026-10-23 归档预期身份核对
+
+PR #24 已按固定head019936332e2ec31e5639f7b087d283392d50a8e4合并，
+main c3917834c9792ab53858b1b7ed7c1a999199c16d；组合95聚焦/333全量和合并后4例通过。
+本片从该已合并main独立建立 codex/worldctl-archive-identity-20261023，未借其他WIP。
+新增 inspect-archive --expected-head FULL_SHA --expected-suite offline。
+身份参数先验证；先校验完整包/日志/原始状态，再比较包内记录的 execution_head_sha/suite，
+缺失BLOCKED3、不符FAIL4；匹配仍保留原执行失败4/超时5。未指定预期不声称匹配。
+与inspect-run复用同一身份检查，避免两份规则漂移；不改变归档/记录schema，不读取原目录，
+不将检查器head替代执行head，不认证保存声明/模型输入消费/实验来源。
+例：python worldctl.py test inspect-archive --archive saved.json --expected-head FULL_SHA --expected-suite offline --json
+影响集：新归档身份测试、归档、身份、记录消费端、记录生产端、执行器、test-run与CLI。
+命名影响集105项通过，Ruff/格式及3生产模块strict Linux mypy通过；
+干净精确代码候选 88c4887b1332f4a33a042845221312c72a7b2bad 已通过一次完整28脚本343项门；
+6个实际CLI归档身份场景通过，密钥扫描0。保存执行head与检查器head分列；
+不指定身份时匹配未知；不匹配时保留recorded_exit_code并FAIL4。
+本提交只更新交接，生产/测试字节与受测代码相同，不重复全量。验证目录 D:/study-agent-validation/worldctl-archive-identity-verify-20261023/。
+本地当前范围审阅通过：共享预期参数验证/匹配函数，inspect-run旧API不变；
+归档先校验保存的完整性/原始状态，再匹配已验证上下文；不更改保存格式或认证标记。
+推送并开独立PR，当前HEAD审阅/必要门确认后固定HEAD合并；不把本地审阅冒充GitHub批准。
+提交/PR/合并状态从本节所属提交、分支与GitHub恢复，不等待CI轮询。
+下一唯一片：本片收口后，按Study Agent自身当前交接恢复CLI验收收口；
+LingBot真实实验产物/配置/消费输入绑定仍未实现，不用离线归档追认模型来源。
+
+
+## 归档集成开发记录（合并前状态）
 
 PR #22/#23 已合并，基线 main e32425aff46947c40ca652f3786d67e488fdada5。
 PR #24 同步该main，局部合并worldctl.py与交接文档，保留原身份核对参数/分发，
