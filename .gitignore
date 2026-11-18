@@ -9,3 +9,12 @@ logs/
 *.json
 *.pth
 *.zip
+# 一次性实验脚手架与生成样例（2026-11-19 整理；本地保留，不入库）
+_*.sh
+_*.py
+_*.txt
+_*.cu
+*.out
+*.log
+examples/*/
+examples/*.npy
